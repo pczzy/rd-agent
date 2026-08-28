@@ -7,6 +7,18 @@
 
 ## TODO
 
+- [ ] **当前 10 轮（loop 29-38）跑完后，关掉 `log_llm_chat_content`**
+  - `.env` 加 `LOG_LLM_CHAT_CONTENT=False`（需重启生效，所以等这轮结束再改）
+  - 实测：17MB 日志里 **97.6% 是 LLM prompt/回复正文**（104213 行中 101680 行），
+    真实事件行只有 2533 行。日志膨胀约 40 倍
+  - 更麻烦的是 grep 诊断失效：CoSTEER 把历史失败反馈嵌进每次 prompt（这部分**是**
+    正确设计，演化式写码需要看到上一版错在哪），但连同 prompt 一起打进日志后，
+    过去的报错会被反复打印，容易误判成新故障——排查时已被坑过两次
+  - 注意 prompt 本身**没有**无界增长：109 次调用 token 数在 2475~10831 之间震荡，
+    不是单调上升（`max_past_message_include=10` 在裁剪）
+  - 复盘需要 prompt 原文时，从 `log/<时间戳>/` 的结构化日志取，比翻文本可靠
+
+
 - [x] **改判定准则：首要指标从 Rank ICIR 换成 Rank IC**（2026-08-28 完成）
   - `developer/feedback.py:17` `IMPORTANT_METRICS` 把 `Rank IC` 提到首位
   - `prompts.yaml` 因子侧/模型侧判定改为：**Rank IC 提升（幅度 >0.001，低于此视为噪音）
