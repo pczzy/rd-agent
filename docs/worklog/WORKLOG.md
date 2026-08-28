@@ -14,7 +14,14 @@
   - 用三个真实历史案例回测新准则，判断全部正确：
     Loop 27（Rank IC 0.0425）由 `no` 纠正为 `yes`；Loop 22 噪音级提升仍拒绝；
     假 alpha（ARR 28% / Rank IC 0.0087）仍拒绝
-- [ ] 修 OOM：`MULTI_PROC_N` 从 6 降到 2–3（详见"已知问题"）
+- [x] **修 OOM**（2026-08-28 完成，未动 `MULTI_PROC_N`）
+  - `developer/utils.py` 新增 `_combine_factor_frames()` 取代 `pd.concat(axis=1)`：
+    先求一次并集索引，再填预分配的 float32 二维块
+  - 实测 4 个真实因子（各约 1500 万行）：`pd.concat` +2928MB → 新实现 **+230MB（降 92%）**
+  - 等价性已验证：shape / index / columns / NaN 位置完全一致，
+    最大相对误差 5.96e-08（float32 精度内）
+  - 非数值列等异常会回退到 `pd.concat`，最坏情况不劣于原实现
+  - `MULTI_PROC_N=6` 保留 —— 并行度是因子重算速度的关键
 - [ ] 决定是否把 Loop 27 定为新的基线模型（holdout 表现全面优于 Loop 5）
 
 ---
