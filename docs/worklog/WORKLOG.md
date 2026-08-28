@@ -22,7 +22,14 @@
     最大相对误差 5.96e-08（float32 精度内）
   - 非数值列等异常会回退到 `pd.concat`，最坏情况不劣于原实现
   - `MULTI_PROC_N=6` 保留 —— 并行度是因子重算速度的关键
-- [ ] 决定是否把 Loop 27 定为新的基线模型（holdout 表现全面优于 Loop 5）
+- [x] **Loop 27 定为新基线**（2026-08-28 完成）
+  - 已把 session `log/2026-08-25_01-43-12-429660/__session__/28/4_record` 里
+    `trace.hist[27].decision` 从 `False` 翻为 `True`（原判定来自旧的 Rank ICIR 优先准则）
+  - 验证：`get_sota_hypothesis_and_experiment()` 现返回 Rank IC 0.0425 / Rank ICIR 0.2324 /
+    ARR 0.1162；decision=True 的条目变为 `[0,1,3,4,5,27]`，已接受因子实验 4 个
+  - 原文件备份在同目录 `4_record.bak-before-loop27-baseline`
+  - **续跑请用这个路径**：`--path log/2026-08-25_01-43-12-429660/__session__/28/4_record`
+    （其他更早的 dump 里 trace 仍是旧的）
 
 ---
 
