@@ -7,15 +7,13 @@
 
 ## TODO
 
-- [ ] **改判定准则：首要指标从 Rank ICIR 换成 Rank IC**
-  - 现状：`rdagent/scenarios/qlib/prompts.yaml` 两处判定文字以 Rank ICIR 为主
-    （因子侧约 189 行、模型侧约 269 行），`developer/feedback.py:17` 的
-    `IMPORTANT_METRICS` 也把 `Rank ICIR` 排在首位。
-  - 为什么要改：Loop 27 的 Rank IC 0.0425（全程最高）但 Rank ICIR 0.2324 略低于
-    SOTA 的 0.2541，被系统判成 `no`。而 holdout 验证证明 Loop 27 才是更好的模型
-    （见下文"holdout 验证"）。**准则和目标没对齐。**
-  - 建议改法：Rank IC 为首要指标；Rank ICIR 降级为稳定性约束，例如
-    "Rank IC 提升 且 Rank ICIR 不低于 SOTA 的 80%" 才接受。
+- [x] **改判定准则：首要指标从 Rank ICIR 换成 Rank IC**（2026-08-28 完成）
+  - `developer/feedback.py:17` `IMPORTANT_METRICS` 把 `Rank IC` 提到首位
+  - `prompts.yaml` 因子侧/模型侧判定改为：**Rank IC 提升（幅度 >0.001，低于此视为噪音）
+    且 Rank ICIR ≥ SOTA 的 80%** 才接受；Rank ICIR 降级为稳定性护栏
+  - 用三个真实历史案例回测新准则，判断全部正确：
+    Loop 27（Rank IC 0.0425）由 `no` 纠正为 `yes`；Loop 22 噪音级提升仍拒绝；
+    假 alpha（ARR 28% / Rank IC 0.0087）仍拒绝
 - [ ] 修 OOM：`MULTI_PROC_N` 从 6 降到 2–3（详见"已知问题"）
 - [ ] 决定是否把 Loop 27 定为新的基线模型（holdout 表现全面优于 Loop 5）
 

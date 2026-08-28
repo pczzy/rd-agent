@@ -185,9 +185,14 @@ factor_feedback_generation:
       3. Final Goal: To continuously accumulate factors that surpass each iteration to maintain the best SOTA.
     
     When judging the results:
-      1. The primary criterion is persistent cross-sectional ranking skill, measured by
-         Rank ICIR first and Rank IC second. Set `Replace Best Result` to yes when
-         Rank ICIR improves and Rank IC does not deteriorate.
+      1. The primary criterion is Rank IC: it measures cross-sectional ranking skill over
+         the whole universe, which is what a tradable signal needs. Set `Replace Best
+         Result` to yes when Rank IC improves over the SOTA AND Rank ICIR stays at or
+         above 80% of the SOTA's Rank ICIR.
+         Rank ICIR is a stability guard, not the objective: a small Rank ICIR dip that
+         buys a clear Rank IC gain is an acceptable trade, but a Rank IC gain bought with
+         a collapse in Rank ICIR means the signal only works in a few periods: reject it.
+         Treat a Rank IC change below 0.001 as noise, not an improvement.
       2. Annualized return is supporting evidence only, never sufficient on its own. A
          higher annualized return combined with a flat or lower Rank IC indicates profit
          concentrated in a few lucky days rather than a tradable signal: reject it.
@@ -272,8 +277,14 @@ model_feedback_generation:
 
     # When judging the results:
     1. **Recommendation for Replacement:**
-      - The primary criterion is persistent cross-sectional ranking skill: recommend replacement
-        when Rank ICIR improves and Rank IC does not deteriorate.
+      - The primary criterion is Rank IC: it measures cross-sectional ranking skill over the
+        whole universe, which is what a tradable signal needs. Recommend replacement when
+        Rank IC improves over the SOTA AND Rank ICIR stays at or above 80% of the SOTA's
+        Rank ICIR.
+      - Rank ICIR is a stability guard, not the objective: a small Rank ICIR dip that buys a
+        clear Rank IC gain is an acceptable trade, but a Rank IC gain bought with a collapse
+        in Rank ICIR means the signal only works in a few periods: reject it.
+      - Treat a Rank IC change below 0.001 as noise, not an improvement.
       - Annualized return is supporting evidence only, never sufficient on its own. A higher
         annualized return together with a flat or lower Rank IC means the profit is concentrated
         in a few lucky days rather than a tradable signal: do not recommend replacement.

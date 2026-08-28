@@ -15,11 +15,12 @@ from rdagent.utils.agent.tpl import T
 DIRNAME = Path(__file__).absolute().resolve().parent
 
 IMPORTANT_METRICS = [
-    # Rank ICIR / Rank IC come first: they measure persistent cross-sectional ranking
-    # skill, which is what survives out-of-sample. Annualized return alone selects for
-    # high-variance strategies whose profit is concentrated in a handful of days.
-    "Rank ICIR",
+    # Rank IC leads: it is the objective, measuring cross-sectional ranking skill, which
+    # is what survives out-of-sample. Rank ICIR follows as the stability guard. Annualized
+    # return alone selects for high-variance strategies whose profit is concentrated in a
+    # handful of days, so it is listed last and treated as supporting evidence only.
     "Rank IC",
+    "Rank ICIR",
     "ICIR",
     "IC",
     "1day.excess_return_with_cost.annualized_return",
