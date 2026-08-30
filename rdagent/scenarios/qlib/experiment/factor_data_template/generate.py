@@ -8,10 +8,10 @@ from qlib.data import D
 # (winsorising at the 1%/99% quantile, percentile ranks) are computed over whatever
 # is in this file, so pulling all 6081 A-shares while the backtest trades csi1000
 # silently references the wrong distribution.
-UNIVERSE = "csi1000"
+UNIVERSE = "csi300"
 instruments = D.instruments(UNIVERSE)
 fields = ["$open", "$close", "$high", "$low", "$volume", "$factor"]
-data = D.features(instruments, fields, freq="day").swaplevel().sort_index().loc["2014-01-01":].sort_index()
+data = D.features(instruments, fields, freq="day").swaplevel().sort_index().loc["2008-12-29":].sort_index()
 
 data.to_hdf("./daily_pv_all.h5", key="data")
 

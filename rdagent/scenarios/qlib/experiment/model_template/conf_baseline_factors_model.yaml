@@ -1,8 +1,8 @@
 qlib_init:
     provider_uri: "~/.qlib/qlib_data/cn_data"
     region: cn
-market: &market csi1000
-benchmark: &benchmark SH000852
+market: &market csi300
+benchmark: &benchmark SH000300
 
 data_handler_config: &data_handler_config
     start_time: {{ train_start | default("2008-01-01", true) }}
@@ -15,8 +15,14 @@ data_handler_config: &data_handler_config
                 - class: qlib.contrib.data.loader.Alpha158DL
                   kwargs:
                     config:
+                        # Forward return over `label_horizon` days, entered at T+1.
+                        # A 1-day horizon is the hardest target there is: on the same
+                        # factor set a 20-day horizon measured 2.2x the Rank IC
+                        # (0.0655 vs 0.0297). The deployed strategy predicts 20 days
+                        # and rebalances every 10, so the search has to optimise the
+                        # same target it will be used for.
                         label: 
-                            - ["Ref($close, -2)/Ref($close, -1) - 1"]
+                            - ["Ref($close, -{{ label_horizon | default(21, true) }})/Ref($close, -1) - 1"]
                             - ["LABEL0"]
                         feature:
                             - {{ feature_expressions }}
@@ -55,19 +61,16 @@ port_analysis_config: &port_analysis_config
         account: 100000000
         benchmark: *benchmark
         exchange_kwargs:
-            # csi1000 mixes main-board (+-10%) with ChiNext/STAR (+-20%) names. 0.195
-            # is the loose bound: 0.095 would wrongly mark every +-20% name
-            # as limit-locked and understate what was tradable.
-            limit_threshold: 0.195
+            limit_threshold: 0.095
             deal_price: close
-            # Measured on csi1000 at a 200k account, topk~50: commission 0.125%
-            # (the 5 CNY floor dominates at this size), half-spread 0.04%, and
-            # square-root impact 0.1*sqrt(participation) 0.46%, so ~0.65% a side.
-            # The 5bp/15bp defaults assume institutional size and understate the
-            # real drag by roughly 6x, which is enough to flatter a high-turnover
-            # strategy into looking profitable.
-            open_cost: 0.0065
-            close_cost: 0.0070
+            # Measured for a 200k retail account on csi300, topk~30: commission
+            # 0.075% (the 5 CNY floor still binds), transfer 0.001%, half-spread
+            # 0.030%, and impact Y*sigma*sqrt(participation) with Y=1 and the
+            # universe's 2.29% daily vol giving 0.085% -- about 0.19% a side.
+            # The 5bp/15bp defaults assume institutional size and understate this
+            # by ~4x, which flatters any high-turnover strategy.
+            open_cost: 0.0019
+            close_cost: 0.0024
             min_cost: 5
 task:
     model:
