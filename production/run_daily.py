@@ -1,0 +1,208 @@
+"""每日运行入口：刷新因子 -> 出预测 -> 生成订单清单。
+
+    python production/run_daily.py                 # 全流程
+    python production/run_daily.py --skip-signal   # 复用上次预测，只重算组合和订单
+    python production/run_daily.py --date 2026-08-21
+
+产出 orders/YYYY-MM-DD.csv 和 reports/YYYY-MM-DD.md，不下单。
+确认订单后自行执行，再用 --confirm 把持仓状态写回。
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parent
+REPO = ROOT.parent
+sys.path.insert(0, str(REPO))
+
+from production.pipeline import (  # noqa: E402
+    build_target,
+    compute_factors,
+    estimate_cost,
+    generate_orders,
+    load_config,
+    load_positions,
+    save_positions,
+)
+
+
+def refresh_signal(cfg: dict, factors_path: Path) -> Path:
+    """跑 qlib 训练+预测，返回 pred.pkl 路径。
+
+    直接复用 qrun 与回测同一条代码路径，而不是另写一份推理代码 —— 两份实现迟早会漂移，
+    而这里任何偏差都会让 holdout 验证出来的数字不再适用。
+    """
+    from rdagent.utils.env import QTDockerEnv
+    from rdagent.utils.qlib import ALPHA20
+
+    sig, uni = cfg["signal"], cfg["universe"]
+    src = REPO / "rdagent/scenarios/qlib/experiment/factor_template"
+    work = Path(tempfile.mkdtemp())
+    for f in src.glob("*"):
+        if f.is_file():
+            shutil.copy(f, work)
+    shutil.copy(factors_path, work / "combined_factors_df.parquet")
+    shutil.copy(ROOT / "models/model.py", work / "model.py")
+
+    env = {
+        "PYTHONPATH": "./",
+        "train_start": sig["train_start"],
+        "train_end": sig["train_end"],
+        "valid_start": sig["valid_start"],
+        "valid_end": sig["valid_end"],
+        "test_start": sig["valid_end"],
+        "test_end": "2099-12-31",
+        "label_horizon": str(sig["label_horizon"]),
+        "feature_names": str(list(ALPHA20.keys())),
+        "feature_expressions": str(list(ALPHA20.values())),
+        "num_features": "31",
+        "num_timesteps": "20",
+        "step_len": "20",
+        "dataset_cls": "TSDatasetH",
+        "n_epochs": "50",
+        "lr": "0.0005",
+        "early_stop": "10",
+        "batch_size": "1024",
+        "weight_decay": "1e-4",
+        "topk": str(cfg["account"]["max_positions"]),
+        "n_drop": "1",
+        "MLFLOW_ALLOW_FILE_STORE": "true",
+    }
+    qt = QTDockerEnv()
+    qt.prepare()
+    qt.check_output(local_path=str(work), entry="qrun conf_combined_factors_sota_model.yaml", env=env)
+    preds = sorted(work.glob("mlruns/*/*/artifacts/pred.pkl"), key=lambda p: p.stat().st_mtime)
+    if not preds:
+        raise RuntimeError("qrun 未产出 pred.pkl，检查容器日志")
+    return preds[-1]
+
+
+_SNAPSHOT_SRC = """
+import sys, warnings; warnings.filterwarnings("ignore")
+import pandas as pd, qlib
+from qlib.constant import REG_CN
+qlib.init(provider_uri="~/.qlib/qlib_data/cn_data", region=REG_CN,
+          expression_cache=None, dataset_cache=None)
+from qlib.data import D
+market, as_of, win, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+start = (pd.Timestamp(as_of) - pd.Timedelta(days=win * 3)).strftime("%Y-%m-%d")
+df = D.features(D.instruments(market),
+                ["$close", "$factor", "Mean($close*$volume, %d)" % win],
+                start_time=start, end_time=as_of, freq="day")
+df.columns = ["close", "factor", "adv"]
+last = df.groupby(level="instrument").last()
+pd.DataFrame({"price": last["close"] / last["factor"], "adv": last["adv"]}).dropna().to_pickle(out)
+"""
+
+
+def market_snapshot(cfg: dict, as_of: str) -> tuple[pd.Series, pd.Series]:
+    """返回 (真实价, 滚动成交额)。
+
+    $close 是复权价，下单要用真实价 $close/$factor —— 用复权价会把一手成本算错数倍。
+
+    qlib 只装在 rdagent4qlib 里，所以这段在子进程跑，避免整个流程被绑死在某个
+    conda 环境下。QLIB_PYTHON 可覆盖解释器路径。
+    """
+    win = cfg["universe"]["liquidity_window"]
+    work = Path(tempfile.mkdtemp())
+    script, out = work / "snap.py", work / "snap.pkl"
+    script.write_text(_SNAPSHOT_SRC)
+    python = os.environ.get("QLIB_PYTHON", "/root/miniconda3/envs/rdagent4qlib/bin/python")
+    proc = subprocess.run(
+        [python, str(script), cfg["universe"]["market"], as_of, str(win), str(out)],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    if not out.exists():
+        raise RuntimeError(f"行情快照失败（{python}）:\n{(proc.stderr or '')[-500:]}")
+    snap = pd.read_pickle(out)
+    return snap["price"], snap["adv"]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", default=None, help="截止日期，默认用数据最新日")
+    ap.add_argument("--skip-signal", action="store_true", help="复用上次预测")
+    ap.add_argument("--confirm", action="store_true", help="把今日订单计入持仓状态")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    h5 = REPO / "rdagent/scenarios/qlib/experiment/factor_data_template/daily_pv_all.h5"
+    if not h5.exists():
+        print("缺少行情数据，先跑 generate_data_folder_from_qlib()", file=sys.stderr)
+        return 1
+
+    as_of = args.date or pd.read_hdf(h5, key="data").index.get_level_values("datetime").max().strftime("%Y-%m-%d")
+    print(f"截止日期 {as_of}")
+
+    pred_cache = ROOT / "state/pred.pkl"
+    if args.skip_signal and pred_cache.exists():
+        print("复用已有预测")
+    else:
+        print("计算因子…")
+        factors = ROOT / "state/combined_factors_df.parquet"
+        compute_factors(h5, factors)
+        print("训练并预测…（数分钟）")
+        shutil.copy(refresh_signal(cfg, factors), pred_cache)
+
+    pred = pd.read_pickle(pred_cache)
+    if isinstance(pred, pd.DataFrame):
+        pred = pred.iloc[:, 0]
+    latest = pred.index.get_level_values("datetime").max()
+    scores = pred.xs(latest, level="datetime")
+    print(f"信号日期 {latest.date()}，覆盖 {len(scores)} 只")
+
+    prices, adv = market_snapshot(cfg, as_of)
+    target = build_target(scores, prices, adv, cfg)
+    current = load_positions(ROOT / "state/positions.json")
+    orders = generate_orders(current, target, prices, cfg)
+    cost = estimate_cost(orders, cfg)
+
+    stamp = pd.Timestamp(as_of).strftime("%Y-%m-%d")
+    if not orders.empty:
+        orders.to_csv(ROOT / f"orders/{stamp}.csv", index=False)
+
+    held = sum(prices.get(c, 0) * s for c, s in target.items())
+    lines = [
+        f"# 交易计划 {stamp}",
+        "",
+        f"- 信号日期：{latest.date()}",
+        f"- 目标持仓：{len(target)} 只，市值 {held:,.0f} 元" f"（占资金 {held / cfg['account']['capital']:.1%}）",
+        f"- 订单：{len(orders)} 笔"
+        f"（买 {(orders['side'] == 'BUY').sum() if not orders.empty else 0}，"
+        f"卖 {(orders['side'] == 'SELL').sum() if not orders.empty else 0}）",
+        f"- 成交额：{orders['value'].sum() if not orders.empty else 0:,.0f} 元",
+        f"- 预估成本：{cost:,.0f} 元" f"（{cost / cfg['account']['capital']:.3%}）",
+        "",
+        "## 订单",
+        "",
+        orders.to_markdown(index=False) if not orders.empty else "无",
+        "",
+        "> 本清单不自动下单。人工确认执行后，用 --confirm 更新持仓状态。",
+    ]
+    (ROOT / f"reports/{stamp}.md").write_text("\n".join(lines))
+
+    print(f"\n目标 {len(target)} 只 | 订单 {len(orders)} 笔 | 预估成本 {cost:,.0f} 元")
+    print(f"报告 production/reports/{stamp}.md")
+
+    if args.confirm:
+        save_positions(ROOT / "state/positions.json", target)
+        print("持仓状态已更新")
+    elif not orders.empty:
+        print("确认执行后加 --confirm 更新持仓")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

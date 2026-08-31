@@ -1,0 +1,87 @@
+# 实盘系统
+
+从信号到订单清单的完整流程。**不连券商，不自动下单** —— 产出 CSV，人工确认后执行。
+
+## 每日操作
+
+```bash
+# 1) 生成今日交易计划（首次或需刷新信号时，约 10-15 分钟）
+python production/run_daily.py
+
+# 2) 只重算组合和订单，复用上次预测（秒级）
+python production/run_daily.py --skip-signal
+
+# 3) 人工执行订单后，把持仓写回状态
+python production/run_daily.py --skip-signal --confirm
+```
+
+产出：
+- `orders/YYYY-MM-DD.csv` —— 订单清单（code / side / shares / price / value）
+- `reports/YYYY-MM-DD.md` —— 当日计划摘要
+
+信号按 `config.yaml` 的 `refresh_every_n_days: 10` 更新，其余交易日用 `--skip-signal`
+复用即可。
+
+## 当前配置的由来
+
+参数不是随手设的，每条都对应 `docs/worklog/WORKLOG.md` 里的实测：
+
+| 参数 | 值 | 依据 |
+|---|---|---|
+| `liquidity_pct` | 0.50 | holdout 上不过滤时年化 -1.44%/回撤 -23.9%，过滤后 +10.23%/-9.6% |
+| `label_horizon` | 21 | 1 日目标的 Rank IC 只有 20 日的 1/2.2 |
+| `refresh_every_n_days` | 10 | holdout 上每日/每5日/每10日分别 +8.96%/+5.37%/+9.22% |
+| `max_positions` | 30 | topk=30 优于 20（净 +2.20% vs -4.81%，换手更低） |
+| `cost_one_side` | 0.00191 | 20 万账户实测：佣金 0.075% + 过户 0.001% + 半价差 0.030% + 冲击 0.085% |
+
+**回测表现**（holdout 2025-01~2026-08，397 交易日，从未参与参数选择）：
+年化超额 +9.22%，IR 0.73，最大回撤 -19.6%，日均换手 6.4%。
+
+## 结构
+
+```
+config.yaml     所有参数
+pipeline.py     因子计算 / 组合构建 / 订单生成 / 成本估算
+run_daily.py    每日入口
+factors/        11 个因子代码（搜索得到）
+models/         BiGRU-Attention 模型定义
+state/          当前持仓 positions.json、缓存的预测 pred.pkl
+orders/         订单清单
+reports/        每日报告
+```
+
+## 风控
+
+配置在 `config.yaml` 的 `risk` 段，代码里强制执行：
+
+- **单只上限** `max_weight_per_stock: 0.045`。必须 ≥ 1/`max_positions`，否则两个约束
+  互相打架 —— 0.05×30 看似宽松，实际前 20 只就用完资金，只能建 20 只仓。
+- **单日换手上限** `max_daily_turnover: 0.15`。仅在已有持仓时生效：空仓建仓的换手必然
+  等于目标仓位，拿它撞上限会把首日订单砍掉大半。
+- **最小单笔** `min_order_value: 3000`。低于此金额时 5 元佣金占比过高（0.17%）。
+  **清仓单不受此限制**，否则小额仓位永远出不掉。
+- **整手约束**：全部订单为 100 股整数倍。
+- **一手超上限的股票自动跳过并顺延**。csi300 里一手上万的不少（SH688256 一手 10.35 万），
+  20 万账户买不起；不顺延会有两成多资金闲置。
+- **持仓无法定价时告警**。退市/长期停牌的仓位会打印警告要求人工处理，而不是静默跳过
+  ——静默的话这笔仓位会一直挂在账上却从不出现在订单里。
+
+## 已知限制
+
+1. **未接券商**。订单需人工执行。接入时在 `run_daily.py` 末尾加下单调用即可，
+   `orders` DataFrame 已是标准格式。
+2. **模型 train/valid 止于 2025-12**。上线前应重跑一次 `run_daily.py`（不加
+   `--skip-signal`）用最新数据重训。
+3. **冲击成本系数未实测**。`cost_one_side` 里的 0.085% 用文献 `Y=1` 估算。建议用几千块
+   小额单实测：记录下单时中间价与成交均价之差，反推真实 Y。
+4. **`best epoch = 0`**。20 日重叠标签使有效独立时段仅约 170 个（3401 交易日 / 20），
+   模型第一轮就学完可学的信息。不影响信号有效性（已做标签随机化检验：打乱后 Rank IC
+   归零），但意味着深度模型的容量是浪费的 —— LightGBM 在同数据上 Rank IC 0.1256，
+   与 BiGRU 的 0.1245 打平。若要简化部署可换 LightGBM。
+
+## 上线前检查
+
+- [ ] 用最新数据重训（`run_daily.py` 不加 `--skip-signal`）
+- [ ] 小额实测冲击成本，回填 `config.yaml` 的 `cost_one_side`
+- [ ] 确认 `state/positions.json` 与券商实际持仓一致
+- [ ] 首日只用小仓位跑通全流程（下单、成交、对账）

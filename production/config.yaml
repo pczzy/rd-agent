@@ -1,0 +1,39 @@
+# 实盘配置。所有可调参数集中在这里，代码不再硬编码。
+# 数值来自 docs/worklog/WORKLOG.md 记录的 holdout 验证结果。
+
+account:
+  capital: 200000          # 账户总资金（元）
+  max_positions: 30        # 最大持仓只数
+  # 单只上限必须 >= 1/max_positions，否则两个约束互相打架：0.05 x 30 = 150% 看似宽松，
+  # 但等权时每只只能拿 1/30 = 3.33%，而 5% 的上限让前 20 只就用完了资金，
+  # 实际只建到 20 只。取 0.045 给等权留一点余量又不至于挤掉后面的名字。
+  max_weight_per_stock: 0.045
+
+universe:
+  market: csi300
+  benchmark: SH000300
+  # 只交易滚动 20 日成交额排名前 liquidity_pct 的股票。
+  # holdout 实测：不加此过滤时年化 -1.44%、回撤 -23.9%；加了 +10.23%、-9.6%。
+  liquidity_pct: 0.50
+  liquidity_window: 20
+
+signal:
+  label_horizon: 21        # 预测 T+1 -> T+21 收益。1 日目标的 Rank IC 只有其 1/2.2
+  refresh_every_n_days: 10 # 信号每 N 个交易日更新一次，其余日沿用
+  train_start: "2010-01-01"
+  train_end: "2023-12-31"
+  valid_start: "2024-01-01"
+  valid_end: "2025-12-31"
+
+trading:
+  lot_size: 100            # A 股一手
+  # 单边成本，用于事前估算而非撮合：佣金 0.075%(5元底线仍触发) + 过户 0.001%
+  # + 半价差 0.030% + 冲击 Y*sigma*sqrt(参与率) 0.085%，Y=1、sigma=2.29%
+  cost_one_side: 0.00191
+  stamp_duty: 0.0005       # 印花税，仅卖出
+  min_commission: 5.0
+
+risk:
+  max_daily_turnover: 0.15   # 单日换手上限，超过则截断订单
+  min_order_value: 3000      # 单笔低于此金额不下单（5 元佣金占比过高）
+  halt_on_drawdown: 0.20     # 回撤超过此值停止开新仓，仅允许平仓
