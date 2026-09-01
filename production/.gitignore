@@ -2,3 +2,4 @@ state/*.pkl
 state/*.parquet
 orders/*.csv
 reports/*.md
+fills/*.csv
