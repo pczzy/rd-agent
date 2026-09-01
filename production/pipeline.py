@@ -137,8 +137,13 @@ def generate_orders(
     target: dict[str, int],
     prices: pd.Series,
     cfg: dict,
+    halted: bool = False,
 ) -> pd.DataFrame:
-    """目标 vs 现有持仓求差，产出订单；按风控规则过滤。"""
+    """目标 vs 现有持仓求差，产出订单；按风控规则过滤。
+
+    halted=True 时只放行卖单。回撤触发熔断说明信号可能整体失效，此时继续按信号
+    加仓是在往失效的方向追加暴露。
+    """
     risk, trd, acct = cfg["risk"], cfg["trading"], cfg["account"]
     rows: list[dict] = []
     stuck: list[str] = []
@@ -183,6 +188,12 @@ def generate_orders(
         orders = orders[orders["value"].cumsum() <= cap]
         print(f"  [风控] 换手 {turnover:.1%} 超上限，订单截断至 {len(orders)} 笔")
 
+    if halted:
+        dropped = (orders["side"] == "BUY").sum()
+        orders = orders[orders["side"] == "SELL"]
+        if dropped:
+            print(f"  [熔断] 回撤超限，已丢弃 {dropped} 笔买单，仅保留卖出")
+
     return orders.sort_values(["side", "value"], ascending=[True, False]).reset_index(drop=True)
 
 
@@ -201,10 +212,80 @@ def estimate_cost(orders: pd.DataFrame, cfg: dict) -> float:
 
 
 def load_positions(path: Path) -> dict[str, int]:
+    """只要股数。旧格式是 {code: shares}，新格式带成本价，两者都读得了。"""
     if not path.exists():
         return {}
-    return {k: int(v) for k, v in json.loads(path.read_text()).items()}
+    raw = json.loads(path.read_text())
+    return {k: int(v["shares"] if isinstance(v, dict) else v) for k, v in raw.items()}
 
 
-def save_positions(path: Path, positions: dict[str, int]) -> None:
-    path.write_text(json.dumps({k: v for k, v in sorted(positions.items()) if v}, indent=1))
+def load_cost_basis(path: Path) -> dict[str, float]:
+    """建仓成本价。旧格式没有这个信息，返回空表示无法计算浮亏。"""
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text())
+    return {k: float(v["cost"]) for k, v in raw.items() if isinstance(v, dict) and v.get("cost")}
+
+
+def save_positions(
+    path: Path,
+    positions: dict[str, int],
+    prices: pd.Series | None = None,
+    previous: dict[str, int] | None = None,
+    prev_cost: dict[str, float] | None = None,
+) -> None:
+    """写回持仓并维护成本价。
+
+    加仓时成本按股数加权平均，减仓时成本不变（卖出不改变剩余股份的持有成本）。
+    没有成本价就算不出单只浮亏，也就没法在报告里提示需要人工看基本面的票。
+    """
+    previous, prev_cost = previous or {}, prev_cost or {}
+    out: dict[str, dict] = {}
+    for code, shares in sorted(positions.items()):
+        if not shares:
+            continue
+        entry = {"shares": int(shares)}
+        old_shares, old_cost = previous.get(code, 0), prev_cost.get(code)
+        px = float(prices[code]) if prices is not None and code in prices.index else None
+        if shares > old_shares and px is not None:
+            added = shares - old_shares
+            entry["cost"] = round((old_shares * old_cost + added * px) / shares if old_cost else px, 4)
+        elif old_cost:
+            entry["cost"] = round(old_cost, 4)
+        elif px is not None:
+            entry["cost"] = round(px, 4)
+        out[code] = entry
+    path.write_text(json.dumps(out, indent=1))
+
+
+# --------------------------------------------------------------------------- 回撤
+
+
+def record_equity(path: Path, date: str, equity: float) -> tuple[float, float]:
+    """追加净值并返回 (峰值, 当前回撤)。
+
+    回撤要算在组合层面而不是个股：这是截面策略，个股跌 20% 而指数跌 25% 其实是赢的，
+    真正该防的是信号整体失效，那表现为组合净值持续走低。
+    """
+    rows = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=["date", "equity"])
+    rows = rows[rows["date"] != date]
+    rows = pd.concat([rows, pd.DataFrame([{"date": date, "equity": equity}])], ignore_index=True)
+    rows = rows.sort_values("date").reset_index(drop=True)
+    rows.to_csv(path, index=False)
+    peak = float(rows["equity"].cummax().iloc[-1])
+    return peak, 0.0 if peak <= 0 else 1.0 - equity / peak
+
+
+def losing_positions(
+    positions: dict[str, int], cost: dict[str, float], prices: pd.Series, threshold: float
+) -> list[tuple[str, float]]:
+    """浮亏超过阈值的持仓。只提示不自动卖 —— 退市风险、财务暴雷这类事件模型看不到，
+    人能看到，该由人判断。"""
+    out = []
+    for code in positions:
+        basis, px = cost.get(code), prices.get(code)
+        if basis and px and np.isfinite(px):
+            ret = px / basis - 1.0
+            if ret <= -threshold:
+                out.append((code, ret))
+    return sorted(out, key=lambda x: x[1])

@@ -31,7 +31,10 @@ from production.pipeline import (  # noqa: E402
     estimate_cost,
     generate_orders,
     load_config,
+    load_cost_basis,
     load_positions,
+    losing_positions,
+    record_equity,
     save_positions,
 )
 
@@ -164,10 +167,25 @@ def main() -> int:
     print(f"信号日期 {latest.date()}，覆盖 {len(scores)} 只")
 
     prices, adv = market_snapshot(cfg, as_of)
+    pos_path = ROOT / "state/positions.json"
+    current = load_positions(pos_path)
+    cost_basis = load_cost_basis(pos_path)
+
+    # 组合回撤：持仓市值 + 现金。没有持仓时按满仓资金计，避免空仓被当成回撤。
+    held_value = sum(float(prices.get(c, 0)) * s for c, s in current.items())
+    equity = held_value + max(0.0, cfg["account"]["capital"] - held_value) if current else cfg["account"]["capital"]
+    peak, drawdown = record_equity(ROOT / "state/equity.csv", as_of, equity)
+    halted = drawdown >= cfg["risk"]["halt_on_drawdown"]
+    if halted:
+        print(f"  [熔断] 回撤 {drawdown:.1%} >= {cfg['risk']['halt_on_drawdown']:.0%}，本日仅允许卖出")
+
     target = build_target(scores, prices, adv, cfg)
-    current = load_positions(ROOT / "state/positions.json")
-    orders = generate_orders(current, target, prices, cfg)
+    orders = generate_orders(current, target, prices, cfg, halted=halted)
     cost = estimate_cost(orders, cfg)
+
+    losers = losing_positions(current, cost_basis, prices, 0.30)
+    for code, ret in losers:
+        print(f"  [关注] {code} 浮亏 {ret:.1%}，建议人工核查基本面")
 
     stamp = pd.Timestamp(as_of).strftime("%Y-%m-%d")
     if not orders.empty:
@@ -184,7 +202,10 @@ def main() -> int:
         f"卖 {(orders['side'] == 'SELL').sum() if not orders.empty else 0}）",
         f"- 成交额：{orders['value'].sum() if not orders.empty else 0:,.0f} 元",
         f"- 预估成本：{cost:,.0f} 元" f"（{cost / cfg['account']['capital']:.3%}）",
+        f"- 组合净值：{equity:,.0f} 元 | 峰值 {peak:,.0f} | 回撤 {drawdown:.1%}"
+        + ("  **已熔断，仅卖出**" if halted else ""),
         "",
+        *(["## 需人工核查（浮亏 >30%）", ""] + [f"- {c} {r:.1%}" for c, r in losers] + [""] if losers else []),
         "## 订单",
         "",
         orders.to_markdown(index=False) if not orders.empty else "无",
@@ -197,7 +218,11 @@ def main() -> int:
     print(f"报告 production/reports/{stamp}.md")
 
     if args.confirm:
-        save_positions(ROOT / "state/positions.json", target)
+        # 熔断时目标不等于实际结果：买单没下，持仓只减不增
+        settled = {c: s for c, s in target.items() if not halted or s <= current.get(c, 0)}
+        if halted:
+            settled = {c: min(s, current.get(c, 0)) for c, s in target.items() if current.get(c, 0)}
+        save_positions(pos_path, settled, prices, current, cost_basis)
         print("持仓状态已更新")
     elif not orders.empty:
         print("确认执行后加 --confirm 更新持仓")
