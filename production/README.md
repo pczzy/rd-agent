@@ -2,6 +2,23 @@
 
 从信号到订单清单的完整流程。**不连券商，不自动下单** —— 产出 CSV，人工确认后执行。
 
+## 数据更新
+
+qlib 官方数据集更新滞后（本机曾落后 11 个交易日），每次调仓前先补数据：
+
+```bash
+python production/update_data.py --check   # 看差多少天
+python production/update_data.py           # 从新浪财经补齐
+python -c "from rdagent.scenarios.qlib.experiment.utils import generate_data_folder_from_qlib as g; g()"
+```
+
+脚本做三件事，缺一不可：补日历、**顺延成分表**、写各股 `.bin`。漏掉成分表的话
+`D.instruments()` 在新日期返回空集，症状是"行情更新了但信号不动"。
+
+两个口径要点：新浪返回**不复权价**（qlib 存的是复权价 = 真实价 × factor），
+volume 按股而 qlib 按手。factor 沿用最后已知值——日线接口看不到除权信息，所以
+跨越除权日会有偏差，**每季度应该用 qlib 官方数据重拉一次全量**。
+
 ## 每日操作
 
 ```bash

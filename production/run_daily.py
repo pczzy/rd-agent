@@ -39,7 +39,7 @@ from production.pipeline import (  # noqa: E402
 )
 
 
-def refresh_signal(cfg: dict, factors_path: Path) -> Path:
+def refresh_signal(cfg: dict, factors_path: Path, as_of: str) -> Path:
     """跑 qlib 训练+预测，返回 pred.pkl 路径。
 
     直接复用 qrun 与回测同一条代码路径，而不是另写一份推理代码 —— 两份实现迟早会漂移，
@@ -64,7 +64,10 @@ def refresh_signal(cfg: dict, factors_path: Path) -> Path:
         "valid_start": sig["valid_start"],
         "valid_end": sig["valid_end"],
         "test_start": sig["valid_end"],
-        "test_end": "2099-12-31",
+        # 用数据实际末端而非 2099：qlib 回测循环会走到日历尽头再取下一步，
+        # 越界抛的 IndexError 出现在预测产出之后（不影响 pred.pkl），但它会在日志里
+        # 留下一条假故障，掩盖真正需要注意的报错。
+        "test_end": as_of,
         "label_horizon": str(sig["label_horizon"]),
         "feature_names": str(list(ALPHA20.keys())),
         "feature_expressions": str(list(ALPHA20.values())),
@@ -157,7 +160,7 @@ def main() -> int:
         factors = ROOT / "state/combined_factors_df.parquet"
         compute_factors(h5, factors)
         print("训练并预测…（数分钟）")
-        shutil.copy(refresh_signal(cfg, factors), pred_cache)
+        shutil.copy(refresh_signal(cfg, factors, as_of), pred_cache)
 
     pred = pd.read_pickle(pred_cache)
     if isinstance(pred, pd.DataFrame):
