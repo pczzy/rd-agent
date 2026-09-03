@@ -36,6 +36,7 @@ from production.pipeline import (  # noqa: E402
     losing_positions,
     record_equity,
     save_positions,
+    with_names,
 )
 
 
@@ -183,7 +184,7 @@ def main() -> int:
         print(f"  [熔断] 回撤 {drawdown:.1%} >= {cfg['risk']['halt_on_drawdown']:.0%}，本日仅允许卖出")
 
     target = build_target(scores, prices, adv, cfg)
-    orders = generate_orders(current, target, prices, cfg, halted=halted)
+    orders = with_names(generate_orders(current, target, prices, cfg, halted=halted))
     cost = estimate_cost(orders, cfg)
 
     losers = losing_positions(current, cost_basis, prices, 0.30)

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 import yaml
 
 ROOT = Path(__file__).resolve().parent
@@ -206,6 +208,56 @@ def estimate_cost(orders: pd.DataFrame, cfg: dict) -> float:
     commission_floor = np.maximum(per_side, trd["min_commission"])
     stamp = orders.loc[orders["side"] == "SELL", "value"].sum() * trd["stamp_duty"]
     return float(commission_floor.sum() + stamp)
+
+
+# --------------------------------------------------------------------------- 名称
+
+
+_NAMES_CACHE = ROOT / "state/names.json"
+_SINA_HQ = "http://hq.sinajs.cn/list={codes}"
+
+
+def stock_names(codes, cache_path: Path | None = None) -> dict[str, str]:
+    """代码 -> 中文简称。订单清单是给人看的，光有代码核对起来太容易看错行。
+
+    名称几乎不变，所以命中缓存的不再请求；ST 加帽摘帽这类改名确实会发生，
+    删掉 state/names.json 即可重建。名称只是显示用，取不到不该拖垮出单，
+    因此网络失败只警告并留空。
+    """
+    path = cache_path or _NAMES_CACHE
+    cache: dict[str, str] = json.loads(path.read_text()) if path.exists() else {}
+    missing = sorted({c for c in codes if c not in cache})
+
+    for i in range(0, len(missing), 50):
+        batch = missing[i : i + 50]
+        try:
+            # Referer 必须带：新浪对该接口做了防盗链，缺了就返回空串
+            resp = requests.get(
+                _SINA_HQ.format(codes=",".join(c.lower() for c in batch)),
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "http://finance.sina.com.cn"},
+                timeout=20,
+            )
+            resp.encoding = "gbk"
+            for line in resp.text.splitlines():
+                m = re.match(r'var hq_str_(\w+)="([^",]*)', line.strip())
+                if m and m.group(2):
+                    cache[m.group(1).upper()] = m.group(2)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [警告] 股票名称获取失败，将留空: {exc}", file=sys.stderr)
+            break
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, ensure_ascii=False, indent=1, sort_keys=True))
+    return {c: cache.get(c, "") for c in codes}
+
+
+def with_names(orders: pd.DataFrame) -> pd.DataFrame:
+    """在 code 右边插入 name 列。"""
+    if orders.empty:
+        return orders.assign(name="")[["code", "name", "side", "shares", "price", "value"]]
+    out = orders.copy()
+    out.insert(1, "name", out["code"].map(stock_names(list(out["code"]))))
+    return out
 
 
 # --------------------------------------------------------------------------- 状态

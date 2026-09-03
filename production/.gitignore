@@ -3,3 +3,4 @@ state/*.parquet
 orders/*.csv
 reports/*.md
 fills/*.csv
+state/names.json
