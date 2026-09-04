@@ -137,17 +137,42 @@ def build_target(
     lot = trd["lot_size"]
     cap_per_stock = acct["capital"] * acct["max_weight_per_stock"]
 
+    # 两步分配：先按等权配一手起步，再把零头补给离等权最远的。
+    #
+    # 回测里的 TopkDropoutStrategy 是"取前 30 只等权"，不受整手和账户规模约束；
+    # 这里能做的是尽量逼近它，所以目标是等权，而不是按分数加权 —— 打分经过
+    # CSZScoreNorm，是截面序数不是校准过的预期收益，按它配权重没有验证支撑。
+    #
+    # 保底一手是必需的。曾经按一手成本降序、budget = remaining/slots 分配，最贵的几只
+    # 撞上开局的 20 万/30 = 6667 元拿到 0 股：打分第 9 的票被挤掉、只填满 26 个名额、
+    # 6707 元闲置。光改成分数序不够，开局 budget 仍低于一手上万的票，实测只建到 27 只、
+    # 资金利用率反降到 92.3%。两者一起才填满 30 只、用到 99.9%。
+    share = min(acct["capital"] / len(affordable), cap_per_stock)
     target: dict[str, int] = {}
-    remaining, slots = acct["capital"], len(affordable)
-    for code in sorted(affordable, key=lambda c: float(prices[c]) * lot, reverse=True):
-        budget = min(remaining / slots, cap_per_stock)
-        px = float(prices[code])
-        lots = int(budget // (px * lot))
+    remaining = acct["capital"]
+    for code in affordable:  # 已按分数降序
+        lot_cost = float(prices[code]) * lot
+        lots = int(share // lot_cost)
+        if lots == 0 and lot_cost <= min(cap_per_stock, remaining):
+            lots = 1
         if lots >= 1:
-            shares = lots * lot
-            target[code] = shares
-            remaining -= shares * px
-        slots -= 1
+            target[code] = lots * lot
+            remaining -= lots * lot_cost
+
+    # 零头补给当前市值最低的那只，逐手推进，直到没人加得动。
+    # 补给分数最高的也是一种选法（对高信心加权），但那会放大权重离散，偏离等权基准。
+    while True:
+        room = [
+            c
+            for c in affordable
+            if float(prices[c]) * lot <= remaining
+            and (target.get(c, 0) + lot) * float(prices[c]) <= cap_per_stock
+        ]
+        if not room:
+            break
+        code = min(room, key=lambda c: target.get(c, 0) * float(prices[c]))
+        target[code] = target.get(code, 0) + lot
+        remaining -= float(prices[code]) * lot
     return target
 
 
