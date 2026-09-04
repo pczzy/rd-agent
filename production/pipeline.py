@@ -94,6 +94,33 @@ def liquid_universe(adv: pd.Series, pct: float) -> pd.Index:
     return adv[adv >= adv.quantile(1.0 - pct)].index
 
 
+def screen(
+    scores: pd.Series,
+    prices: pd.Series,
+    adv: pd.Series,
+    cfg: dict,
+) -> tuple[pd.Index, list[str]]:
+    """三层筛选，返回 (合格池, 最终候选)。
+
+    build_target 和 rank_table 共用这一份：一个决定买什么，一个向人解释为什么没买，
+    两处各写一份筛选逻辑迟早会漂移，那时报告里的"未入选原因"就会开始骗人。
+    """
+    acct, uni, trd = cfg["account"], cfg["universe"], cfg["trading"]
+
+    eligible = scores.index.intersection(liquid_universe(adv, uni["liquidity_pct"]))
+    eligible = eligible.intersection(prices.dropna().index)
+    if len(eligible) == 0:
+        return eligible, []
+
+    cap_per_stock = acct["capital"] * acct["max_weight_per_stock"]
+    # 先按分数排序，再顺着取买得起的，直到凑满 max_positions。
+    # 只从前 N 名里筛会漏掉资金：csi300 里一手上万的名字不少（SH688256 一手 10.35 万），
+    # 20 万的账户买不起，若不顺延就会有两成多资金闲置。
+    ranked = scores.loc[eligible].sort_values(ascending=False).index
+    affordable = [c for c in ranked if float(prices[c]) * trd["lot_size"] <= cap_per_stock]
+    return eligible, affordable[: acct["max_positions"]]
+
+
 def build_target(
     scores: pd.Series,
     prices: pd.Series,
@@ -101,24 +128,14 @@ def build_target(
     cfg: dict,
 ) -> dict[str, int]:
     """把当日打分转成目标持仓（股数），已做整手和单只上限约束。"""
-    acct, uni, trd = cfg["account"], cfg["universe"], cfg["trading"]
+    acct, trd = cfg["account"], cfg["trading"]
 
-    eligible = scores.index.intersection(liquid_universe(adv, uni["liquidity_pct"]))
-    eligible = eligible.intersection(prices.dropna().index)
-    if len(eligible) == 0:
+    _, affordable = screen(scores, prices, adv, cfg)
+    if not affordable:
         return {}
 
     lot = trd["lot_size"]
     cap_per_stock = acct["capital"] * acct["max_weight_per_stock"]
-
-    # 先按分数排序，再顺着取买得起的，直到凑满 max_positions。
-    # 只从前 N 名里筛会漏掉资金：csi300 里一手上万的名字不少（SH688256 一手 10.35 万），
-    # 20 万的账户买不起，若不顺延就会有两成多资金闲置。
-    ranked = scores.loc[eligible].sort_values(ascending=False).index
-    affordable = [c for c in ranked if float(prices[c]) * lot <= cap_per_stock]
-    affordable = affordable[: acct["max_positions"]]
-    if not affordable:
-        return {}
 
     target: dict[str, int] = {}
     remaining, slots = acct["capital"], len(affordable)
@@ -258,6 +275,59 @@ def with_names(orders: pd.DataFrame) -> pd.DataFrame:
     out = orders.copy()
     out.insert(1, "name", out["code"].map(stock_names(list(out["code"]))))
     return out
+
+
+def rank_table(
+    scores: pd.Series,
+    prices: pd.Series,
+    adv: pd.Series,
+    target: dict[str, int],
+    cfg: dict,
+) -> pd.DataFrame:
+    """全池按模型打分倒排，并标注每只为何进/没进目标组合。
+
+    订单清单是按金额排的，看不出模型的信心次序 —— 排第一行的往往只是股价低、
+    一手便宜、凑得出最大单笔金额的那只。真正的高分票常因为一手买不起被跳过，
+    这在只看订单时是隐形的，必须单独出一张表才看得见。
+    """
+    acct, trd = cfg["account"], cfg["trading"]
+    lot, cap_per_stock = trd["lot_size"], acct["capital"] * acct["max_weight_per_stock"]
+    eligible, affordable = screen(scores, prices, adv, cfg)
+    eligible, affordable = set(eligible), list(affordable)
+    ranked = scores.sort_values(ascending=False)
+    names = stock_names(list(ranked.index))
+
+    rows = []
+    for i, (code, score) in enumerate(ranked.items(), 1):
+        px = float(prices.get(code, np.nan))
+        lot_cost = px * lot if np.isfinite(px) else np.nan
+        shares = target.get(code, 0)
+        if shares:
+            status = "入选"
+        elif not np.isfinite(px):
+            status = "无报价"
+        elif code not in eligible:
+            status = "流动性未达标"
+        elif lot_cost > cap_per_stock:
+            # 一手就超过单只上限：不是模型不看好，是这个账户规模买不起
+            status = "一手超上限"
+        elif code in affordable:
+            status = "资金不足"
+        else:
+            status = "名额已满"
+        rows.append(
+            dict(
+                rank=i,
+                code=code,
+                name=names.get(code, ""),
+                score=round(float(score), 6),
+                price=round(px, 3) if np.isfinite(px) else np.nan,
+                lot_cost=round(lot_cost, 1) if np.isfinite(lot_cost) else np.nan,
+                shares=shares,
+                status=status,
+            )
+        )
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- 状态

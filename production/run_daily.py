@@ -4,7 +4,9 @@
     python production/run_daily.py --skip-signal   # 复用上次预测，只重算组合和订单
     python production/run_daily.py --date 2026-08-21
 
-产出 orders/YYYY-MM-DD.csv 和 reports/YYYY-MM-DD.md，不下单。
+产出三份：orders/YYYY-MM-DD.csv（按订单金额）、signals/YYYY-MM-DD.csv（全池按模型打分
+倒排，含未入选原因），以及对应的 reports/YYYY-MM-DD.md 与 reports/YYYY-MM-DD-signal.md。
+不下单。
 确认订单后自行执行，再用 --confirm 把持仓状态写回。
 """
 
@@ -33,6 +35,7 @@ from production.pipeline import (  # noqa: E402
     load_config,
     load_cost_basis,
     load_positions,
+    rank_table,
     losing_positions,
     record_equity,
     save_positions,
@@ -218,8 +221,38 @@ def main() -> int:
     ]
     (ROOT / f"reports/{stamp}.md").write_text("\n".join(lines))
 
+    # 第二张表：按模型打分倒排。订单表按金额排，第一行往往只是"一手最便宜、
+    # 凑得出最大单笔"的那只，跟模型的信心次序无关，两者必须分开看。
+    ranks = rank_table(scores, prices, adv, target, cfg)
+    ranks.to_csv(ROOT / f"signals/{stamp}.csv", index=False)
+
+    top = ranks.head(cfg["account"]["max_positions"] + 10)
+    skipped = int((ranks.head(10)["status"] == "一手超上限").sum())
+    picked = ranks[ranks["shares"] > 0]
+    sig_lines = [
+        f"# 信号排名 {stamp}",
+        "",
+        f"- 信号日期：{latest.date()}，全池 {len(ranks)} 只",
+        f"- 流动性达标 {(ranks['status'] != '流动性未达标').sum()} 只"
+        f"（前 {cfg['universe']['liquidity_pct']:.0%} 成交额）",
+        f"- 入选 {len(picked)} 只，打分排名中位 {picked['rank'].median():.0f}"
+        if len(picked)
+        else "- 入选 0 只",
+        f"- 前 10 名中有 {skipped} 只因一手超过单只上限（"
+        f"{cfg['account']['capital'] * cfg['account']['max_weight_per_stock']:,.0f} 元）买不起",
+        "",
+        f"## 前 {len(top)} 名",
+        "",
+        top.to_markdown(index=False),
+        "",
+        "> 完整 300 只见 signals/" + stamp + ".csv。status 含义：入选 / 一手超上限 /",
+        "> 流动性未达标 / 名额已满 / 资金不足 / 无报价。",
+    ]
+    (ROOT / f"reports/{stamp}-signal.md").write_text("\n".join(sig_lines))
+
     print(f"\n目标 {len(target)} 只 | 订单 {len(orders)} 笔 | 预估成本 {cost:,.0f} 元")
-    print(f"报告 production/reports/{stamp}.md")
+    print(f"报告 production/reports/{stamp}.md（按金额）")
+    print(f"     production/reports/{stamp}-signal.md（按模型打分）")
 
     if args.confirm:
         # 熔断时目标不等于实际结果：买单没下，持仓只减不增

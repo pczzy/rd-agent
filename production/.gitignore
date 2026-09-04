@@ -4,3 +4,4 @@ orders/*.csv
 reports/*.md
 fills/*.csv
 state/names.json
+signals/*.csv
