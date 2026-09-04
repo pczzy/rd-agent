@@ -20,6 +20,7 @@ universe:
 signal:
   label_horizon: 21        # 预测 T+1 -> T+21 收益。1 日目标的 Rank IC 只有其 1/2.2
   refresh_every_n_days: 10 # 信号每 N 个交易日更新一次，其余日沿用
+  seed: 42                 # 固定随机种子，否则两次刷新的差异里混着重训噪声
   train_start: "2010-01-01"
   train_end: "2023-12-31"
   valid_start: "2024-01-01"

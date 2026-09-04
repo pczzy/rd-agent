@@ -2,6 +2,7 @@
 
     python production/run_daily.py                 # 全流程
     python production/run_daily.py --skip-signal   # 复用上次预测，只重算组合和订单
+    python production/run_daily.py --risk-only     # 只看净值/回撤，不出订单
     python production/run_daily.py --date 2026-08-21
 
 产出三份：orders/YYYY-MM-DD.csv（按订单金额）、signals/YYYY-MM-DD.csv（全池按模型打分
@@ -79,6 +80,9 @@ def refresh_signal(cfg: dict, factors_path: Path, as_of: str) -> Path:
         "num_timesteps": "20",
         "step_len": "20",
         "dataset_cls": "TSDatasetH",
+        # 固定种子：不设的话每次刷新都是一套新的随机初始化，两次信号的差异里
+        # 混着重训噪声，分不清哪部分是新数据带来的。
+        "seed": str(sig.get("seed", 42)),
         "n_epochs": "50",
         "lr": "0.0005",
         "early_stop": "10",
@@ -145,7 +149,15 @@ def main() -> int:
     ap.add_argument("--date", default=None, help="截止日期，默认用数据最新日")
     ap.add_argument("--skip-signal", action="store_true", help="复用上次预测")
     ap.add_argument("--confirm", action="store_true", help="把今日订单计入持仓状态")
+    ap.add_argument(
+        "--risk-only",
+        action="store_true",
+        help="只看净值/回撤/浮亏，不出订单（信号未到刷新日时用）",
+    )
     args = ap.parse_args()
+    if args.risk_only and args.confirm:
+        print("--risk-only 不产生订单，不能和 --confirm 同用", file=sys.stderr)
+        return 1
 
     cfg = load_config()
     h5 = REPO / "rdagent/scenarios/qlib/experiment/factor_data_template/daily_pv_all.h5"
@@ -157,21 +169,22 @@ def main() -> int:
     print(f"截止日期 {as_of}")
 
     pred_cache = ROOT / "state/pred.pkl"
-    if args.skip_signal and pred_cache.exists():
-        print("复用已有预测")
-    else:
-        print("计算因子…")
-        factors = ROOT / "state/combined_factors_df.parquet"
-        compute_factors(h5, factors)
-        print("训练并预测…（数分钟）")
-        shutil.copy(refresh_signal(cfg, factors, as_of), pred_cache)
+    if not args.risk_only:
+        if args.skip_signal and pred_cache.exists():
+            print("复用已有预测")
+        else:
+            print("计算因子…")
+            factors = ROOT / "state/combined_factors_df.parquet"
+            compute_factors(h5, factors)
+            print("训练并预测…（数分钟）")
+            shutil.copy(refresh_signal(cfg, factors, as_of), pred_cache)
 
-    pred = pd.read_pickle(pred_cache)
-    if isinstance(pred, pd.DataFrame):
-        pred = pred.iloc[:, 0]
-    latest = pred.index.get_level_values("datetime").max()
-    scores = pred.xs(latest, level="datetime")
-    print(f"信号日期 {latest.date()}，覆盖 {len(scores)} 只")
+        pred = pd.read_pickle(pred_cache)
+        if isinstance(pred, pd.DataFrame):
+            pred = pred.iloc[:, 0]
+        latest = pred.index.get_level_values("datetime").max()
+        scores = pred.xs(latest, level="datetime")
+        print(f"信号日期 {latest.date()}，覆盖 {len(scores)} 只")
 
     prices, adv = market_snapshot(cfg, as_of)
     pos_path = ROOT / "state/positions.json"
@@ -186,13 +199,23 @@ def main() -> int:
     if halted:
         print(f"  [熔断] 回撤 {drawdown:.1%} >= {cfg['risk']['halt_on_drawdown']:.0%}，本日仅允许卖出")
 
-    target = build_target(scores, prices, adv, cfg)
-    orders = with_names(generate_orders(current, target, prices, cfg, halted=halted))
-    cost = estimate_cost(orders, cfg)
-
     losers = losing_positions(current, cost_basis, prices, 0.30)
     for code, ret in losers:
         print(f"  [关注] {code} 浮亏 {ret:.1%}，建议人工核查基本面")
+
+    if args.risk_only:
+        # 信号未到刷新日时的每日一看：净值和回撤只需要持仓和当日价格，不需要预测。
+        # 刻意不出订单 —— 同一份打分下，仅价格漂移就能让整手数和筛选结果变化，
+        # 实测这种"零新信息"的日间换手可达 15%，执行它只是在付手续费。
+        print(f"\n持仓 {len(current)} 只 | 市值 {held_value:,.0f} 元")
+        print(f"净值 {equity:,.0f} 元 | 峰值 {peak:,.0f} | 回撤 {drawdown:.1%}"
+              + (f"（已超 {cfg['risk']['halt_on_drawdown']:.0%} 熔断线）" if halted else ""))
+        print("未出订单（--risk-only）。到刷新日再跑完整流程。")
+        return 0
+
+    target = build_target(scores, prices, adv, cfg)
+    orders = with_names(generate_orders(current, target, prices, cfg, halted=halted))
+    cost = estimate_cost(orders, cfg)
 
     stamp = pd.Timestamp(as_of).strftime("%Y-%m-%d")
     if not orders.empty:

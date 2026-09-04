@@ -93,6 +93,11 @@ task:
             # DataLoader intermittently deadlocks when workers outnumber cores.
             n_jobs: {{ n_jobs | default(8, true) }}
             GPU: 0
+            # Only pinned when the caller sets it, so the search loop keeps its
+            # fresh init per run. Production pins it: without a fixed seed two
+            # consecutive refreshes differ by retrain noise as well as by new
+            # data, and the two cannot be told apart.
+            {% if seed %}seed: {{ seed }}{% endif %}
             pt_model_uri: "model.model_cls"
             pt_model_kwargs: {
                 "num_features": {{ num_features if num_features else undefined_num_features_must_be_set() }}{% if num_timesteps %}, "num_timesteps": {{ num_timesteps }}{% endif %}
