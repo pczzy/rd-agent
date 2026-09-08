@@ -19,6 +19,40 @@ python -c "from rdagent.scenarios.qlib.experiment.utils import generate_data_fol
 volume 按股而 qlib 按手。factor 沿用最后已知值——日线接口看不到除权信息，所以
 跨越除权日会有偏差，**每季度应该用 qlib 官方数据重拉一次全量**。
 
+### 自动更新
+
+上面两步已由 `auto_update.sh` 接管，crontab 在**周一至周五 18:00**（收盘后三小时）触发：
+
+```cron
+0 18 * * 1-5 /root/RD-Agent/production/auto_update.sh >/dev/null 2>&1
+```
+
+- **节假日不必特判**：休市日新浪返回不出新的交易日，`update_data.py` 打印"数据已是最新"
+  后 0 退出，h5 重生成随之跳过。周末由 cron 的 `1-5` 挡掉（A 股调休也不在周末开市）。
+- **h5 只在它落后于日历时才重生成**：它跑在 docker 里，是这条链上最慢的一步。
+  判据是 `logs/.h5_synced_until`（上次重生成成功时的日历末日）与当前日历末日是否相等，
+  而不是"本次日历有没有变长" —— 后者在第一步成功、第二步失败的那天之后会以为无事可做，
+  h5 就永远停在旧日期上。用前者则第二天自动补上。
+- **自锁**：`flock` 挡住手动执行与 cron 撞车，避免两个进程并发写同一批 `.bin`。
+- 用 `rdagent` 环境的解释器：`rdagent4qlib` 虽然装了 qlib 却缺 `fuzzywuzzy`，
+  `import rdagent` 就会炸；而第二步的 qlib 跑在 docker 里，本地并不需要 qlib。
+
+日志在 `production/logs/`（不入库）：`update.log` 是一行一天的流水，
+`YYYY-MM-DD.log` 是当天全文。**每天开工前先看一眼流水**：
+
+```bash
+tail -5 production/logs/update.log
+# 2026-09-08 18:52:10 OK    2026-09-03 -> 2026-09-08，h5 已刷新
+# 状态含义：OK 补上了 / SKIP 无新交易日或有别的实例在跑 / FAIL 见当天全文
+```
+
+`FAIL` 分两种后果：第一步失败则数据原样未动；第二步失败意味着 `.bin` 已经补到新日期
+但 h5 还是旧的，此时 `run_daily.py` 会用旧日期跑出一份看似正常的计划。下一次自动运行
+会重试第二步，但**当天不要直接调仓** —— 要么等下一次，要么手动补跑那条
+`generate_data_folder_from_qlib()`。
+
+自动更新只管数据，**不碰信号也不出订单** —— 调仓仍然是手动跑 `run_daily.py`。
+
 ## 每日操作
 
 ```bash
