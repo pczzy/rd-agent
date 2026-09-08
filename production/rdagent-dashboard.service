@@ -1,0 +1,18 @@
+[Unit]
+Description=RD-Agent 持仓看板 (Streamlit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/RD-Agent
+Environment=HOME=/root
+ExecStart=/root/miniconda3/envs/rdagent/bin/streamlit run production/dashboard.py \
+    --server.address 0.0.0.0 --server.port 8501 \
+    --server.headless true --browser.gatherUsageStats false
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

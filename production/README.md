@@ -101,6 +101,37 @@ python production/record_trades.py --rebuild   # 改完流水后重放
 两条记账路径不要混用：一旦开始用流水，`--confirm` 会绕过流水直接覆盖 `positions.json`，
 之后 `--rebuild` 又会把 `--confirm` 的结果盖掉，两边对不上。
 
+## 看板
+
+浏览器里看当日风险和技术面，常驻服务：
+
+```bash
+systemctl status rdagent-dashboard      # 开机自启，改完代码 restart 一下
+# 本机 http://127.0.0.1:8501 ，局域网 http://<本机 IP>:8501
+```
+
+三页：
+
+- **风险总览** —— 净值/现金/持仓市值/回撤，以及告警：单只权重超 `max_weight_per_stock`、
+  浮亏 >30%、回撤触及熔断线、持仓不在目标组合里（会被清仓）、建满目标组合所需现金
+  超过账户可用现金。阈值与 `config.yaml` 同源，页面只显示不执行。
+- **个股分析** —— 日线经典指标（均线/MACD/RSI/KDJ/BOLL/ATR/量比）+ 文字解读；
+  半日线 price action（摆点结构 HH/HL/LH/LL、支撑阻力、形态、BOS）。
+- **目标组合** —— 最新信号入选的 30 只，带技术面摘要（30 次请求约 2 秒）。
+
+行情从新浪现抓并缓存 5 分钟，所以盘中刷新页面就是最新的。持仓和现金读 `state/`，
+与 `run_daily.py` 同源。**页面只看不下单，也不写任何状态。**
+
+关于那条"4 小时线"：交易软件按整点分桶，A 股一天出两根（上午 9:30–11:30、
+下午 13:00–15:00），每根实际只有 2 小时 —— 看板里叫它半日线。两根拼回去**完全等于**
+日线（实测 OHLC 一分不差，成交量差 0.05%~0.3%，是集合竞价归属差异），
+多出来的信息只有 11:30 那个切点。两个坑写在 `indicators.py` 的模块注释里：
+指标周期自动减半（MA20 只覆盖 10 个交易日），以及量能柱天生高一根低一根
+（A 股日内成交量呈 U 形，实测上午占全天 56%~66%）—— 那是午休，不是资金进出。
+
+服务绑在 `0.0.0.0:8501`，**局域网内谁都能打开，没有鉴权**。不想暴露就把
+`--server.address` 改成 `127.0.0.1`。
+
 ## 当前配置的由来
 
 参数不是随手设的，每条都对应 `docs/worklog/WORKLOG.md` 里的实测：
@@ -125,6 +156,8 @@ run_daily.py    每日入口
 update_data.py  从新浪补行情
 auto_update.sh  crontab 每交易日 18:00 调用，补数据 + 重生成 h5
 record_trades.py 按笔记录实际成交（部分成交时代替 --confirm）
+indicators.py   技术指标 / price action，纯 pandas
+dashboard.py    Streamlit 看板（systemd: rdagent-dashboard）
 logs/           自动更新日志（不入库）
 factors/        11 个因子代码（搜索得到）
 models/         BiGRU-Attention 模型定义
