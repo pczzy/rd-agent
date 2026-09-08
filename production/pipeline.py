@@ -228,9 +228,26 @@ def generate_orders(
     turnover = orders["value"].sum() / acct["capital"]
     if current and turnover > risk["max_daily_turnover"]:
         cap = acct["capital"] * risk["max_daily_turnover"]
-        orders = orders.sort_values("value", ascending=False)
-        orders = orders[orders["value"].cumsum() <= cap]
-        print(f"  [风控] 换手 {turnover:.1%} 超上限，订单截断至 {len(orders)} 笔")
+        sells = orders[orders["side"] == "SELL"]
+        buys = orders[orders["side"] == "BUY"].sort_values("value", ascending=False)
+        # 卖出不受换手上限约束。上限管的是主动换手的成本，而减仓本身就是风控要做的事；
+        # 让卖单也撞上限会把仓位关在里面出不来 —— 一笔大于上限的清仓单永远发不出去，
+        # 且它排在最前，cumsum 从第一行就超标，会连带清空整张表（一笔订单都不剩）。
+        # 买入侧独享全部上限，不扣掉卖出额。扣的话轮动 3 只时只买得回 1 只，剩下的钱要
+        # 空置到下一个刷新日（10 个交易日后）—— 截面策略靠持续持仓吃超额，空仓的机会
+        # 成本比多付的那点手续费大。代价是卖出多的那天总换手会超过标称的 15%。
+        budget = cap
+        keep = []
+        for idx, value in buys["value"].items():
+            # 装不下的跳过，继续看后面装得下的小单，而不是就此打住。
+            # 打住的话上限会远远用不满：第一笔 8,700 元装不下就再也不看后面的 3,000 元单。
+            if value <= budget:
+                keep.append(idx)
+                budget -= value
+        orders = pd.concat([sells, buys.loc[keep]])
+        actual = float(orders["value"].sum()) / acct["capital"]
+        print(f"  [风控] 换手 {turnover:.1%} 超上限 → 保留 {len(sells)} 笔卖出（豁免）"
+              f"+ {len(keep)}/{len(buys)} 笔买入，实际换手 {actual:.1%}")
 
     if halted:
         dropped = (orders["side"] == "BUY").sum()
