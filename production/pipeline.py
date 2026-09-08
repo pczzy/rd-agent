@@ -391,6 +391,17 @@ def load_cost_basis(path: Path) -> dict[str, float]:
     return {k: float(v["cost"]) for k, v in raw.items() if isinstance(v, dict) and v.get("cost")}
 
 
+def load_cash(path: Path) -> float | None:
+    """账户现金余额，由 record_trades.py 从成交流水推出。没有记录时返回 None。
+
+    这个数必须来自实际成交，不能用"总资金 − 持仓市值"倒推：倒推的话持仓涨 1 万、
+    倒推出的现金就少 1 万，净值恒等于总资金，回撤永远是 0，熔断线永远够不着。
+    """
+    if not path.exists():
+        return None
+    return float(json.loads(path.read_text())["cash"])
+
+
 def save_positions(
     path: Path,
     positions: dict[str, int],

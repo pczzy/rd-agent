@@ -33,6 +33,7 @@ from production.pipeline import (  # noqa: E402
     compute_factors,
     estimate_cost,
     generate_orders,
+    load_cash,
     load_config,
     load_cost_basis,
     load_positions,
@@ -191,9 +192,19 @@ def main() -> int:
     current = load_positions(pos_path)
     cost_basis = load_cost_basis(pos_path)
 
-    # 组合回撤：持仓市值 + 现金。没有持仓时按满仓资金计，避免空仓被当成回撤。
+    # 组合回撤：持仓市值 + 现金余额。现金取自 state/cash.json（record_trades.py 按成交
+    # 流水维护），而不是"总资金 − 持仓市值"—— 倒推的现金会把持仓的盈亏原样抵消掉，
+    # 净值恒等于 capital，回撤恒为 0，halt_on_drawdown 那条线永远够不着。
     held_value = sum(float(prices.get(c, 0)) * s for c, s in current.items())
-    equity = held_value + max(0.0, cfg["account"]["capital"] - held_value) if current else cfg["account"]["capital"]
+    cash = load_cash(ROOT / "state/cash.json")
+    if cash is None:
+        # 没有现金记录（比如持仓是 --confirm 直接写的）：退回旧的倒推口径，但要说出来，
+        # 否则报告上那个"回撤 0.0%"看起来像风控在工作，其实是算不出来。
+        cash = max(0.0, cfg["account"]["capital"] - held_value)
+        if current:
+            print("  [注意] 无 state/cash.json，现金按总资金倒推，回撤恒为 0。"
+                  "用 record_trades.py 记账后回撤才有意义")
+    equity = held_value + cash
     peak, drawdown = record_equity(ROOT / "state/equity.csv", as_of, equity)
     halted = drawdown >= cfg["risk"]["halt_on_drawdown"]
     if halted:
