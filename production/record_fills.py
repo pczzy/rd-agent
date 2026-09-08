@@ -173,7 +173,7 @@ def analyse(horizon: int) -> None:
 
     # --- 成本建议 ---------------------------------------------------------
     trd = cfg["trading"]
-    explicit = 0.00075 + 0.00001  # 佣金 + 过户费
+    explicit = trd["commission_rate"] + trd["transfer_rate"]  # 佣金 + 过户费
     slip = hit["slippage"].mean() if not hit.empty else 0.0
     adverse = 0.0
     if not buys.empty and buys["filled"].nunique() == 2:

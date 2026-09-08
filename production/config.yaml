@@ -33,6 +33,10 @@ trading:
   cost_one_side: 0.00191
   stamp_duty: 0.0005       # 印花税，仅卖出
   min_commission: 5.0
+  # 券商实际扣款的两项。与上面的 cost_one_side 区分开：那是含价差和冲击的事前估算，
+  # 只用于评估；这两项是记账口径 —— 真金白银从账户里扣走的部分。
+  commission_rate: 0.00075 # 佣金费率，不足 min_commission 按 min_commission 收
+  transfer_rate: 0.00001   # 过户费，双边
 
 risk:
   max_daily_turnover: 0.15   # 单日换手上限，超过则截断订单

@@ -73,6 +73,34 @@ python production/run_daily.py --skip-signal --confirm
 信号按 `config.yaml` 的 `refresh_every_n_days: 10` 更新，其余交易日用 `--skip-signal`
 复用即可。
 
+### 只成交了一部分怎么记
+
+`--confirm` 假设整张清单原样成交 —— 它把当日**目标组合**直接写成持仓。实盘常常只成交
+一部分（挂限价单、分批下手、手动挑着买），这时用 `record_trades.py` 按笔记账：
+
+```bash
+# 卖出用负股数
+python production/record_trades.py --date 2026-09-04 SZ002594:100@87.31 SZ000333:100@87.25
+
+# 股数/价格照抄某天的订单清单（只在确实按清单价成交时才对）
+python production/record_trades.py --date 2026-09-04 --from-order 2026-09-03 SZ002594 SZ000333
+
+python production/record_trades.py --show      # 看持仓和现金
+python production/record_trades.py --rebuild   # 改完流水后重放
+```
+
+`state/trades.csv` 是唯一事实来源（追加式流水），`positions.json` 和 `cash.json` 都由它
+重放得出。**填错了改流水再 `--rebuild`**，别手工改派生状态 —— 下次重放会把手改盖掉，
+错误看起来像修好了其实没有。
+
+成本价按股数加权平均（加仓）、减仓不变，与 `--confirm` 走的 `save_positions` 同一口径。
+现金按券商实际扣款算：佣金 + 过户费，卖出再加印花税 —— 用的是 `config.yaml` 新增的
+`commission_rate` / `transfer_rate`，**不是** `cost_one_side`。后者含半价差和冲击成本，
+那两项体现在成交价里而不是扣款里，拿它算现金会重复扣两遍。
+
+两条记账路径不要混用：一旦开始用流水，`--confirm` 会绕过流水直接覆盖 `positions.json`，
+之后 `--rebuild` 又会把 `--confirm` 的结果盖掉，两边对不上。
+
 ## 当前配置的由来
 
 参数不是随手设的，每条都对应 `docs/worklog/WORKLOG.md` 里的实测：
@@ -94,9 +122,14 @@ python production/run_daily.py --skip-signal --confirm
 config.yaml     所有参数
 pipeline.py     因子计算 / 组合构建 / 订单生成 / 成本估算
 run_daily.py    每日入口
+update_data.py  从新浪补行情
+auto_update.sh  crontab 每交易日 18:00 调用，补数据 + 重生成 h5
+record_trades.py 按笔记录实际成交（部分成交时代替 --confirm）
+logs/           自动更新日志（不入库）
 factors/        11 个因子代码（搜索得到）
 models/         BiGRU-Attention 模型定义
-state/          当前持仓 positions.json、缓存的预测 pred.pkl
+state/          持仓 positions.json、现金 cash.json、成交流水 trades.csv、
+                净值 equity.csv、缓存的预测 pred.pkl
 orders/         订单清单
 reports/        每日报告
 ```
