@@ -29,7 +29,9 @@ from production.indicators import (  # noqa: E402
     break_of_structure,
     classic_read,
     levels,
+    pa_volume_read,
     patterns,
+    session_volume,
     structure,
     swings,
     to_half_day,
@@ -131,26 +133,36 @@ def daily_chart(d: pd.DataFrame, name: str) -> go.Figure:
 
 
 def half_chart(hb: pd.DataFrame, res: list[float], sup: list[float], name: str) -> go.Figure:
-    s = swings(hb)
+    s = swings(session_volume(hb))
     x = s["seq"].str.slice(5)      # 去掉年份，标签太长
-    fig = go.Figure()
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+                        row_heights=[0.74, 0.26],
+                        subplot_titles=(f"{name} 半日线（软件里的“4 小时线”，一天两根）",
+                                        "段内量比（上午比上午、下午比下午，已消掉 U 形）"))
     fig.add_trace(go.Candlestick(x=x, open=s["open"], high=s["high"], low=s["low"], close=s["close"],
                                  name="半日线", increasing_line_color="#d62728",
-                                 decreasing_line_color="#2ca02c"))
+                                 decreasing_line_color="#2ca02c"), row=1, col=1)
     fig.add_trace(go.Scatter(x=x[s["摆高"]], y=s.loc[s["摆高"], "high"] * 1.004, mode="markers",
-                             marker=dict(symbol="triangle-down", size=9, color="#2ca02c"), name="摆高"))
+                             marker=dict(symbol="triangle-down", size=9, color="#2ca02c"), name="摆高"),
+                  row=1, col=1)
     fig.add_trace(go.Scatter(x=x[s["摆低"]], y=s.loc[s["摆低"], "low"] * 0.996, mode="markers",
-                             marker=dict(symbol="triangle-up", size=9, color="#d62728"), name="摆低"))
+                             marker=dict(symbol="triangle-up", size=9, color="#d62728"), name="摆低"),
+                  row=1, col=1)
     for v in res:
-        fig.add_hline(y=v, line=dict(width=1, dash="dash", color="#2ca02c"),
+        fig.add_hline(y=v, line=dict(width=1, dash="dash", color="#2ca02c"), row=1, col=1,
                       annotation_text=f"阻力 {v:.2f}", annotation_position="right")
     for v in sup:
-        fig.add_hline(y=v, line=dict(width=1, dash="dash", color="#d62728"),
+        fig.add_hline(y=v, line=dict(width=1, dash="dash", color="#d62728"), row=1, col=1,
                       annotation_text=f"支撑 {v:.2f}", annotation_position="right")
+
+    # 画相对量而不是原始量：原始量在半日线上是"高一根低一根"的锯齿，看不出异动
+    up = s["close"] >= s["open"]
+    fig.add_trace(go.Bar(x=x, y=s["段内量比"], name="段内量比", showlegend=False,
+                         marker_color=[COLOR["多"] if u else COLOR["空"] for u in up]), row=2, col=1)
+    fig.add_hline(y=1.0, line=dict(width=1, dash="dash", color="#888"), row=2, col=1)
     fig.update_xaxes(type="category", nticks=14)
-    fig.update_layout(title=f"{name} 半日线（软件里的“4 小时线”，一天两根）", height=520,
-                      margin=dict(l=10, r=80, t=50, b=10), xaxis_rangeslider_visible=False,
-                      legend=dict(orientation="h", y=1.08))
+    fig.update_layout(height=620, margin=dict(l=10, r=80, t=50, b=10),
+                      xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.06))
     return fig
 
 
@@ -323,6 +335,8 @@ elif page == "个股分析":
                 st.markdown("**关键位**")
                 st.write("阻力：" + "、".join(f"{v:.2f}" for v in res) if res else "阻力：暂无")
                 st.write("支撑：" + "、".join(f"{v:.2f}" for v in sup) if sup else "支撑：暂无")
+                st.markdown("**量能**")
+                read_badges(pa_volume_read(hb))
             last = hb.iloc[-1]
             st.caption(f"最后一段：{last['seq']}（{last['段']}） "
                        f"开 {last['open']:.2f} 高 {last['high']:.2f} 低 {last['low']:.2f} 收 {last['close']:.2f}")

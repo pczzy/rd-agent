@@ -59,7 +59,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     d["ATR_PCT"] = d["ATR14"] / c
 
     d["VOL_MA5"] = v.rolling(5).mean()
+    d["VOL_MA10"] = v.rolling(10).mean()
     d["量比"] = v / d["VOL_MA5"]
+    # 量能在 60 日里的分位：绝对手数没有可比性，5 亿股对茅台是地量对浦发是天量
+    d["量分位"] = v.rolling(60).rank(pct=True)
+    # OBV：涨日加量、跌日减量。它看的是量往哪边堆，价格新高而 OBV 不跟 = 背离
+    d["OBV"] = (np.sign(c.diff()).fillna(0) * v).cumsum()
     return d
 
 
@@ -109,9 +114,64 @@ def classic_read(d: pd.DataFrame) -> list[tuple[str, str, str]]:
     out.append(("布林带", f"%B {b:.2f}，位于{where}", "空" if b > 1 else "多" if b < 0 else "中性"))
 
     out.append(("波动", f"ATR14 占价格 {r['ATR_PCT']:.2%}（日均振幅）", "中性"))
+    return out + volume_read(d)
+
+
+def volume_read(d: pd.DataFrame) -> list[tuple[str, str, str]]:
+    """量能解读。单看"放量"没有意义 —— 放量上涨和放量下跌是相反的两件事，
+    所以这里一律把量和价放在一起判断。"""
+    if len(d) < 60:
+        return [("量能", "不足 60 根日线，量能分位算不出来", "中性")]
+    r, prev = d.iloc[-1], d.iloc[-2]
+    chg = r["close"] / prev["close"] - 1
     vr = r["量比"]
-    out.append(("量能", f"量比 {vr:.2f}" + ("，明显放量" if vr > 1.5 else "，缩量" if vr < 0.7 else "，量能平稳"),
-                "中性"))
+    out = []
+
+    # 量价配合的四种组合
+    if chg > 0 and vr > 1.2:
+        out.append(("量价配合", f"价涨 {chg:+.2%} 量增（量比 {vr:.2f}），上涨有量能支持", "多"))
+    elif chg > 0 and vr < 0.8:
+        out.append(("量价配合", f"价涨 {chg:+.2%} 但量缩（量比 {vr:.2f}），涨势缺乏跟风", "空"))
+    elif chg < 0 and vr > 1.2:
+        out.append(("量价配合", f"价跌 {chg:+.2%} 量增（量比 {vr:.2f}），抛压是真实的", "空"))
+    elif chg < 0 and vr < 0.8:
+        out.append(("量价配合", f"价跌 {chg:+.2%} 量缩（量比 {vr:.2f}），抛压在衰竭", "多"))
+    else:
+        out.append(("量价配合", f"价 {chg:+.2%}，量比 {vr:.2f}，量价均无明显异动", "中性"))
+
+    trend = r["VOL_MA5"] / r["VOL_MA10"] - 1
+    out.append(("量能趋势", f"5 日均量较 10 日均量 {trend:+.1%}"
+                + ("，量能在扩张" if trend > 0.1 else "，量能在萎缩" if trend < -0.1 else "，持平"), "中性"))
+
+    q = r["量分位"]
+    if q >= 0.95:
+        out.append(("量能水平", f"60 日分位 {q:.0%}，天量 —— 常见于变盘或衰竭", "中性"))
+    elif q <= 0.05:
+        out.append(("量能水平", f"60 日分位 {q:.0%}，地量 —— 分歧极小，通常在底部或无人问津", "中性"))
+    else:
+        out.append(("量能水平", f"60 日分位 {q:.0%}", "中性"))
+
+    # OBV 背离：价格方向和量堆积方向不一致时最值得看
+    win = 20
+    pc = r["close"] / d["close"].iloc[-win] - 1
+    ov = r["OBV"] - d["OBV"].iloc[-win]
+    scale = d["volume"].iloc[-win:].mean() * win
+    orel = ov / scale if scale else 0.0
+    if pc > 0.02 and orel < -0.05:
+        out.append(("OBV", f"{win} 日价格 {pc:+.1%} 但 OBV 净流出，顶背离", "空"))
+    elif pc < -0.02 and orel > 0.05:
+        out.append(("OBV", f"{win} 日价格 {pc:+.1%} 但 OBV 净流入，底背离", "多"))
+    else:
+        out.append(("OBV", f"{win} 日价格 {pc:+.1%}，OBV 同向（净额约 {orel:+.0%} 日均量）", "中性"))
+
+    # 突破必须看量：缩量突破多半假突破
+    hi20, lo20 = d["high"].iloc[-21:-1].max(), d["low"].iloc[-21:-1].min()
+    if r["close"] > hi20:
+        out.append(("突破确认", f"创 20 日新高，量比 {vr:.2f}"
+                    + ("，放量突破" if vr >= 1.5 else "，缩量突破，可信度低"), "多" if vr >= 1.5 else "空"))
+    elif r["close"] < lo20:
+        out.append(("突破确认", f"创 20 日新低，量比 {vr:.2f}"
+                    + ("，放量下破" if vr >= 1.5 else "，缩量下破"), "空"))
     return out
 
 
@@ -131,6 +191,60 @@ def to_half_day(h60: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     return g.sort_values("seq").reset_index(drop=True)
+
+
+def session_volume(hb: pd.DataFrame, win: int = 20) -> pd.DataFrame:
+    """半日线的量能：上午和上午比、下午和下午比。
+
+    直接拿相邻两根比是没有意义的 —— A 股日内成交量呈 U 形，实测上午占全天 56%~66%，
+    每根下午线都会显示成"缩量"，每根上午线都会显示成"放量"，那是午休不是资金进出。
+    按段各自滚动求均值再相除，U 形就被除掉了，剩下的才是真正的量能异动。
+    """
+    d = hb.copy()
+    d["段均量"] = d.groupby("段")["volume"].transform(lambda s: s.rolling(win, min_periods=5).mean())
+    d["段内量比"] = d["volume"] / d["段均量"]
+    return d
+
+
+def pa_volume_read(hb: pd.DataFrame) -> list[tuple[str, str, str]]:
+    """把量能接到 price action 上：结构和形态是否有量能背书。"""
+    d = session_volume(hb)
+    if d["段均量"].isna().all():
+        return [("量能", "半日线不足 5 天，段内均量算不出来", "中性")]
+    r = d.iloc[-1]
+    vr = r["段内量比"]
+    out = []
+
+    lvl = "，明显放量" if vr > 1.5 else "，缩量" if vr < 0.7 else "，量能正常"
+    out.append(("段内量比", f"本段量为近 20 个「{r['段']}」均量的 {vr:.2f} 倍{lvl}", "中性"))
+
+    up = r["close"] >= r["open"]
+    if up and vr > 1.3:
+        out.append(("量价配合", "这一段收阳且放量，推动是有量的", "多"))
+    elif up and vr < 0.8:
+        out.append(("量价配合", "这一段收阳但缩量，上攻力度存疑", "空"))
+    elif not up and vr > 1.3:
+        out.append(("量价配合", "这一段收阴且放量，卖压真实", "空"))
+    else:
+        out.append(("量价配合", "这一段收阴且缩量，卖压不强", "多"))
+
+    bos = break_of_structure(hb)
+    if bos:
+        ok = vr >= 1.3
+        out.append(("突破量能", f"{'放量' if ok else '缩量'}突破（段内量比 {vr:.2f}）"
+                    + ("" if ok else " —— 缩量突破多半是假突破"), "多" if ok else "空"))
+
+    # 今天上午/下午的量能分布 vs 常态，能看出资金是在盘中哪一段进出的
+    today = d[d["date"] == d["date"].iloc[-1]]
+    if len(today) == 2:
+        am, pm = today.iloc[0]["volume"], today.iloc[1]["volume"]
+        share = am / (am + pm)
+        base = d.groupby("date")["volume"].apply(lambda s: s.iloc[0] / s.sum() if len(s) == 2 else None).dropna()
+        norm = base.tail(20).mean()
+        out.append(("盘中分布", f"今日上午占全天量 {share:.0%}（近 20 日常态 {norm:.0%}）"
+                    + ("，尾盘异常放量" if share < norm - 0.1 else "，早盘异常集中" if share > norm + 0.1 else ""),
+                    "中性"))
+    return out
 
 
 def swings(d: pd.DataFrame, k: int = 2) -> pd.DataFrame:
