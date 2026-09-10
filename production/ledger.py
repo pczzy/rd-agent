@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import json
 from contextlib import contextmanager
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -55,21 +56,40 @@ def read_ledger() -> pd.DataFrame:
     return led[COLUMNS].sort_values(["date", "time"], kind="stable").reset_index(drop=True)
 
 
-def fee_of(value: float, sell: bool, cfg: dict, code: str = "SH") -> float:
-    """券商实际扣款：佣金 + 过户费（仅沪市）+ 印花税（仅卖出）。
+def _cent(x: float) -> float:
+    """四舍五入到分。
 
-    过户费要按市场区分。券商《佣金标准》写明：沪市佣金含经手费、结算费、证管费，
-    **过户费单独向客户收取**；而深市佣金里**已经包含过户费**，再加一遍就是重复计费。
-    北交所/股转同深市（佣金含经手费、结算费、过户费）。
+    不能用内置 round()：它是银行家进位（round(2.675, 2) == 2.67、
+    round(17.505, 2) == 17.5），而回单上的进位是四舍五入。
+    """
+    return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
-    不能用 config 的 cost_one_side —— 那 0.191% 是含半价差和冲击的事前估算，
-    这两项体现在成交价里而不是扣款里，拿它算现金会重复扣两遍。
+
+def fee_parts(value: float, sell: bool, cfg: dict, code: str = "SH") -> dict[str, float]:
+    """按回单的科目拆分：佣金 / 过户费 / 印花税，**各自进位到分**。
+
+    回单是分项列示、分项进位的，所以这里也分项进位再相加 —— 先加总再进位会差 1 分
+    （两项各 1.004 时，分项进位得 2.00，合计进位得 2.01）。
+
+    过户费按市场区分。券商《佣金标准》写明：沪市佣金含经手费、结算费、证管费，
+    **过户费单独向客户收取**；深市佣金里**已经包含过户费**，再加一遍就是重复计费。
+    北交所/股转同深市。
+
+    不能用 config 的 cost_one_side —— 那是含半价差和冲击的事前估算，这两项体现在
+    成交价里而不是扣款里，拿它算现金会重复扣两遍。
     """
     trd = cfg["trading"]
-    commission = max(trd["min_commission"], value * trd["commission_rate"])
-    transfer = value * trd["transfer_rate"] if str(code).upper().startswith("SH") else 0.0
-    stamp_duty = value * trd["stamp_duty"] if sell else 0.0
-    return round(commission + transfer + stamp_duty, 2)
+    is_sh = str(code).upper().startswith("SH")
+    return {
+        "佣金": _cent(max(trd["min_commission"], value * trd["commission_rate"])),
+        "过户费": _cent(value * trd["transfer_rate"]) if is_sh else 0.0,
+        "印花税": _cent(value * trd["stamp_duty"]) if sell else 0.0,
+    }
+
+
+def fee_of(value: float, sell: bool, cfg: dict, code: str = "SH") -> float:
+    """券商实际扣款合计。明细见 fee_parts()。"""
+    return _cent(sum(fee_parts(value, sell, cfg, code).values()))
 
 
 def replay(cfg: dict) -> tuple[dict[str, dict], float, str | None]:

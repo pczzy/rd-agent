@@ -46,6 +46,7 @@ from production.ledger import (  # noqa: E402
     drop_trade,
     duplicate_of,
     fee_of,
+    fee_parts,
     read_ledger,
     replay,
 )
@@ -440,11 +441,14 @@ elif page == "持仓管理":
                 st.error("流水里已有同日同股同量同价的一笔。确实分两笔成交请勾选上面的选项。")
             else:
                 add_trades([row], cfg)
-                how = "券商回单实填" if fee_in > 0 else (
-                    "估算：佣金 + 过户费（沪市）" + ("+ 印花税" if signed < 0 else ""))
+                parts = fee_parts(abs(signed) * float(price), signed < 0, cfg, pick)
+                # 按回单的科目列出来，方便逐项核对而不是只看一个合计
+                detail = "，".join(f"{k} {v:.2f}" for k, v in parts.items() if v or k == "佣金")
+                how = "券商回单实填" if fee_in > 0 else f"估算：{detail}"
                 st.success(f"已记入：{row['date']} {tm} {side} {pick} {abs(signed)} 股 "
                            f"@ {price:.3f}，费用 {row['fee']:.2f} 元（{how}）"
-                           + (f"；公式估算为 {est:.2f} 元" if fee_in > 0 and abs(fee - est) > 0.005 else ""))
+                           + (f"；公式估算为 {est:.2f} 元（{detail}）"
+                              if fee_in > 0 and abs(fee - est) > 0.005 else ""))
                 st.rerun()
 
     st.markdown("### 持仓变动明细")
