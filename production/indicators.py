@@ -284,7 +284,8 @@ def structure(d: pd.DataFrame) -> tuple[str, list[str]]:
     return trend, notes
 
 
-def levels(d: pd.DataFrame, n: int = 4, price: float | None = None) -> tuple[list[float], list[float]]:
+def levels(d: pd.DataFrame, n: int = 4, price: float | None = None
+           ) -> tuple[list[tuple[float, str]], list[tuple[float, str]]]:
     """关键位：现价之上的摆点是阻力，之下的是支撑，各取最近的 n 个。
 
     要按"离现价多近"取，不是按"数值多大"取 —— 后者会把半年前那波高点端上来，
@@ -295,18 +296,22 @@ def levels(d: pd.DataFrame, n: int = 4, price: float | None = None) -> tuple[lis
     """
     s = swings(d)
     price = float(d["close"].iloc[-1]) if price is None else price
-    pts = sorted(s.loc[s["摆高"], "high"].tolist() + s.loc[s["摆低"], "low"].tolist())
+    col = "seq" if "seq" in s.columns else "day"
+    # 每个关键位都带上它是哪一根 K 线留下的 —— 一个说不出时间的价位没法验证
+    pts = [(float(r["high"]), str(r[col])) for _, r in s[s["摆高"]].iterrows()]
+    pts += [(float(r["low"]), str(r[col])) for _, r in s[s["摆低"]].iterrows()]
+    pts.sort(key=lambda x: x[0])
 
-    def thin(vals: list[float]) -> list[float]:
+    def thin(vals: list[tuple[float, str]]) -> list[tuple[float, str]]:
         """由近及远，0.5% 以内视为同一档。"""
-        keep: list[float] = []
+        keep: list[tuple[float, str]] = []
         for v in vals:
-            if not keep or abs(v - keep[-1]) / v > 0.005:
+            if not keep or abs(v[0] - keep[-1][0]) / v[0] > 0.005:
                 keep.append(v)
         return keep[:n]
 
-    res = thin([v for v in pts if v > price])                # 升序 = 由近及远
-    sup = thin([v for v in pts if v < price][::-1])          # 降序 = 由近及远
+    res = thin([p for p in pts if p[0] > price])              # 升序 = 由近及远
+    sup = thin([p for p in pts if p[0] < price][::-1])        # 降序 = 由近及远
     return res, sup
 
 
