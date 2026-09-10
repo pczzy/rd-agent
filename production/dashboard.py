@@ -382,6 +382,11 @@ elif page == "持仓管理":
         st.info("当前空仓。")
 
     st.markdown("### 记一笔成交")
+    trd = cfg["trading"]
+    st.caption(f"费用口径（国金证券佣金标准）：佣金 max({trd['min_commission']:.0f} 元，"
+               f"成交额×{trd['commission_rate']:.3%}，上限 3‰) ｜ 过户费 {trd['transfer_rate']:.3%} "
+               "**仅沪市**（深市已含在佣金里）｜ 印花税 "
+               f"{trd['stamp_duty']:.2%} 仅卖出。有券商回单就直接填实际费用。")
     pool = sorted(set(list(nm) + held))
     pick = st.selectbox("股票", pool, format_func=lambda c: f"{c} {nm.get(c, '')}",
                         index=pool.index(held[0]) if held else 0)
@@ -405,6 +410,11 @@ elif page == "持仓管理":
         tm = c5.text_input("成交时间 HH:MM", value=dt.datetime.now().strftime("%H:%M"),
                            help="填券商回报上的成交时间。留空则只记日期，成本价将说不清是几点的价。")
         note = c6.text_input("备注", placeholder="限价单 / 分批第 2 笔 / 计划外")
+        fee_in = st.number_input(
+            "实际费用（元）", min_value=0.0, value=0.0, step=0.01, format="%.2f",
+            help="填 0 则按券商标准估算：佣金 max(5元, 成交额×0.075%)，沪市另加过户费 0.001%"
+                 "（深市已含在佣金里），卖出再加印花税 0.05%。券商回单上的实际扣款是准的，"
+                 "有就填进来。")
         force = st.checkbox("允许与流水中完全重复的一笔（确实分两笔成交时勾选）")
         submitted = st.form_submit_button("记入流水", type="primary")
 
@@ -421,15 +431,20 @@ elif page == "持仓管理":
         if err:
             st.error(err)
         else:
+            est = fee_of(abs(signed) * float(price), signed < 0, cfg, pick)
+            fee = round(float(fee_in), 2) if fee_in > 0 else est
             row = {"date": date.strftime("%Y-%m-%d"), "time": tm, "code": pick,
                    "name": nm.get(pick, ""), "shares": signed, "price": float(price),
-                   "fee": fee_of(abs(signed) * float(price), signed < 0, cfg), "note": note}
+                   "fee": fee, "note": note}
             if not force and duplicate_of(read_ledger(), row):
                 st.error("流水里已有同日同股同量同价的一笔。确实分两笔成交请勾选上面的选项。")
             else:
                 add_trades([row], cfg)
+                how = "券商回单实填" if fee_in > 0 else (
+                    "估算：佣金 + 过户费（沪市）" + ("+ 印花税" if signed < 0 else ""))
                 st.success(f"已记入：{row['date']} {tm} {side} {pick} {abs(signed)} 股 "
-                           f"@ {price:.3f}，费用 {row['fee']:.2f} 元")
+                           f"@ {price:.3f}，费用 {row['fee']:.2f} 元（{how}）"
+                           + (f"；公式估算为 {est:.2f} 元" if fee_in > 0 and abs(fee - est) > 0.005 else ""))
                 st.rerun()
 
     st.markdown("### 持仓变动明细")

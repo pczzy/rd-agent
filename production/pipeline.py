@@ -28,7 +28,13 @@ REPO = ROOT.parent
 
 
 def load_config(path: Path | None = None) -> dict:
-    return yaml.safe_load((path or ROOT / "config.yaml").read_text())
+    cfg = yaml.safe_load((path or ROOT / "config.yaml").read_text())
+    # 券商《佣金标准》给的上限是成交金额的 3‰。费率多打一个 0 不会报错，只会静默地把
+    # 每笔成本算高一个量级，而它只体现在现金余额上 —— 这种错要在读配置时就拦住。
+    rate = cfg["trading"]["commission_rate"]
+    if rate > 0.003:
+        raise ValueError(f"commission_rate {rate} 超过券商上限 3‰（0.003），检查 config.yaml")
+    return cfg
 
 
 # --------------------------------------------------------------------------- 因子

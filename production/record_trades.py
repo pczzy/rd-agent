@@ -147,7 +147,7 @@ def main() -> int:
             print(f"  [注意] {code} 买入 {shares} 股不是整手，按实际成交记，不拦")
         row = {"date": date, "time": tm, "code": code, "name": nm.get(code, ""),
                "shares": shares, "price": price,
-               "fee": fee_of(abs(shares) * price, shares < 0, cfg), "note": args.note}
+               "fee": fee_of(abs(shares) * price, shares < 0, cfg, code), "note": args.note}
         if not args.force and duplicate_of(led, row):
             raise SystemExit(f"{date} {code} {shares}股@{price} 流水里已有同样一笔。"
                              "确实分两笔成交就加 --force")

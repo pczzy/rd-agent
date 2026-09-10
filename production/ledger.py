@@ -55,16 +55,21 @@ def read_ledger() -> pd.DataFrame:
     return led[COLUMNS].sort_values(["date", "time"], kind="stable").reset_index(drop=True)
 
 
-def fee_of(value: float, sell: bool, cfg: dict) -> float:
-    """券商实际扣款：佣金 + 过户费（双边）+ 印花税（仅卖出）。
+def fee_of(value: float, sell: bool, cfg: dict, code: str = "SH") -> float:
+    """券商实际扣款：佣金 + 过户费（仅沪市）+ 印花税（仅卖出）。
+
+    过户费要按市场区分。券商《佣金标准》写明：沪市佣金含经手费、结算费、证管费，
+    **过户费单独向客户收取**；而深市佣金里**已经包含过户费**，再加一遍就是重复计费。
+    北交所/股转同深市（佣金含经手费、结算费、过户费）。
 
     不能用 config 的 cost_one_side —— 那 0.191% 是含半价差和冲击的事前估算，
     这两项体现在成交价里而不是扣款里，拿它算现金会重复扣两遍。
     """
     trd = cfg["trading"]
     commission = max(trd["min_commission"], value * trd["commission_rate"])
+    transfer = value * trd["transfer_rate"] if str(code).upper().startswith("SH") else 0.0
     stamp_duty = value * trd["stamp_duty"] if sell else 0.0
-    return round(commission + value * trd["transfer_rate"] + stamp_duty, 2)
+    return round(commission + transfer + stamp_duty, 2)
 
 
 def replay(cfg: dict) -> tuple[dict[str, dict], float, str | None]:
