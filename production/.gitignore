@@ -6,3 +6,4 @@ fills/*.csv
 state/names.json
 signals/*.csv
 logs/
+state/.ledger.lock
