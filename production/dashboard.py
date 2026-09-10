@@ -156,6 +156,22 @@ def peak_equity() -> float | None:
     return float(rows["equity"].max()) if len(rows) else None
 
 
+def tone(v) -> str:
+    """盈亏上色。A 股习惯红涨绿跌，与 K 线图一致 —— 页面上两处颜色含义必须一样。"""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    if isinstance(v, str):
+        return f"color:{COLOR['多']}" if v == "买入" else f"color:{COLOR['空']}"
+    return f"color:{COLOR['多']};font-weight:600" if v > 0 else (
+        f"color:{COLOR['空']};font-weight:600" if v < 0 else "")
+
+
+def paint(styler, cols: list[str]):
+    """给存在的列上色。列可能因取价失败整列缺席，subset 传不存在的列会抛 KeyError。"""
+    present = [c for c in cols if c in styler.data.columns]
+    return styler.map(tone, subset=present) if present else styler
+
+
 def read_badges(items: list[tuple[str, str, str]]) -> None:
     for dim, text, level in items:
         st.markdown(f"<div style='padding:4px 0'><b>{dim}</b> "
@@ -296,12 +312,16 @@ if page == "风险总览":
         c2.metric("持仓市值", f"{held_value:,.0f} 元", f"占资金 {held_value / capital:.1%}")
         c3.metric("现金", f"{(cash if cash is not None else capital - held_value):,.0f} 元")
         c4.metric("回撤", f"{dd:.1%}", f"熔断线 {halt:.0%}", delta_color="off")
+        eq_rows = pd.read_csv(ROOT / "state/equity.csv") if (ROOT / "state/equity.csv").exists() else pd.DataFrame()
+        span = f"{eq_rows['date'].iloc[0]} ~ {eq_rows['date'].iloc[-1]}" if len(eq_rows) else "无记录"
+        st.caption(f"峰值 {peak:,.0f} 元取自 `state/equity.csv`（{span}，由 run_daily.py 写入）"
+                   "与当前净值的较大者；本页不写 equity.csv，所以两次调仓之间的净值不进历史。")
         st.caption(f"净值 = 持仓市值 + 现金。持仓市值按实时价计，报价时间 **{as_of}**；"
                    f"现金来自成交流水（末次更新 {json.loads((ROOT / 'state/cash.json').read_text())['as_of']}）。"
                    if cash is not None else f"报价时间 {as_of}")
 
-        st.dataframe(t.style.format({"成本价": "{:.3f}", "现价": "{:.2f}", "市值": "{:,.0f}",
-                                     "浮盈": "{:+.2%}", "权重": "{:.1%}"}),
+        st.dataframe(paint(t.style.format({"成本价": "{:.3f}", "现价": "{:.2f}", "市值": "{:,.0f}",
+                                           "浮盈": "{:+.2%}", "权重": "{:.1%}"}, na_rep="—"), ["浮盈"]),
                      width="stretch", hide_index=True)
 
         st.subheader("告警")
@@ -355,8 +375,8 @@ elif page == "持仓管理":
                          "成本价": basis, "成本形成于": cost_window(h),
                          "现价": px, "报价时间": (info or {}).get("ts", "取价失败"),
                          "浮盈": (px / basis - 1) if px and basis else None})
-        st.dataframe(pd.DataFrame(rows).style.format(
-            {"成本价": "{:.3f}", "现价": "{:.2f}", "浮盈": "{:+.2%}"}),
+        st.dataframe(paint(pd.DataFrame(rows).style.format(
+            {"成本价": "{:.3f}", "现价": "{:.2f}", "浮盈": "{:+.2%}"}, na_rep="—"), ["浮盈"]),
             width="stretch", hide_index=True)
     else:
         st.info("当前空仓。")
@@ -417,7 +437,7 @@ elif page == "持仓管理":
     if ch.empty:
         st.info("流水为空。")
     else:
-        st.dataframe(ch.style.format({"成交价": "{:.3f}", "费用": "{:.2f}"}),
+        st.dataframe(paint(ch.style.format({"成交价": "{:.3f}", "费用": "{:.2f}"}, na_rep="—"), ["方向"]),
                      width="stretch", hide_index=True)
         st.caption("每一行左边是这笔成交做了什么，右边是做完以后变成了什么。成交价的时间即该行「成交时间」。")
 
@@ -437,9 +457,21 @@ elif page == "持仓管理":
 
     book, ledger_cash, last_ts = replay(cfg)
     invested = sum(h["shares"] * h["cost"] for h in book.values())
-    st.caption(f"重放结果：持仓 {len(book)} 只，成本市值 {invested:,.0f} 元，"
-               f"现金 {ledger_cash:,.0f} 元，合计 {invested + ledger_cash:,.0f} 元。"
-               f"末笔成交 {last_ts or '无'}。（成本市值按买入价，不是当前市值）")
+    live = quotes(tuple(sorted(book)))
+    market = sum((live.get(c, {}).get("price") or 0) * h["shares"] for c, h in book.items())
+    mkt_ts = max((v["ts"] for v in live.values()), default="—")
+    # 只有一个数配叫"净值"：现价市值 + 现金。成本市值只用来看浮盈，混着报会和风险总览对不上。
+    st.markdown(f"**重放结果**（末笔成交 {last_ts or '无'}）：持仓 {len(book)} 只，"
+                f"现金 {ledger_cash:,.2f} 元")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("净值（现价口径）", f"{market + ledger_cash:,.0f} 元")
+    c1.caption(f"= 现价市值 {market:,.0f} + 现金，报价时间 {mkt_ts}")
+    c2.metric("现价市值", f"{market:,.0f} 元")
+    c2.caption(f"报价时间 {mkt_ts}")
+    c3.metric("成本市值", f"{invested:,.0f} 元")
+    c3.caption(f"买入价口径，与现价市值之差 {market - invested:+,.0f} 元即当前浮盈")
+    st.caption("「净值」与风险总览页是同一个数（现价市值 + 现金）。成本市值只用于算浮盈，"
+               "不参与净值 —— 两处若报不同口径的合计，必然对不上。")
 
 
 # ---- 个股分析 -------------------------------------------------------------
@@ -577,7 +609,8 @@ else:
                "距MA20": "{:+.1%}", "RSI14": "{:.1f}", "量比": "{:.2f}"}
         # 只格式化真实存在的列：某只取不到行情时它那几列会整列缺席，
         # 直接把完整字典交给 style.format 会 KeyError，整页白屏。
-        st.dataframe(t.style.format({k: v for k, v in fmt.items() if k in t.columns}),
+        st.dataframe(paint(t.style.format({k: v for k, v in fmt.items() if k in t.columns}, na_rep="—"),
+                           ["较信号日", "距MA20"]),
                      width="stretch", hide_index=True, height=640)
         st.caption("「距MA20」「RSI14」「量比」按日线收盘计算，时间见「指标截至」列。")
     else:
