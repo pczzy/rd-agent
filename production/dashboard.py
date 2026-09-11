@@ -593,46 +593,81 @@ else:
     if sig.empty:
         st.info("还没有信号文件，先跑 run_daily.py。")
         st.stop()
-    st.subheader(f"目标组合（信号日 {sig_date}）")
-    picked = sig[sig["shares"] > 0].copy()
-    st.caption(f"入选 {len(picked)} 只，全池 {len(sig)} 只。表里「信号日价」是 {sig_date} 的收盘价，"
-               "组合就是按它算出来的；「现价」是实时价，两者之间的漂移正是照单下单会吃到的偏差。")
 
-    q = quotes(tuple(picked["code"]))
+    # 按模型打分倒排。rank 本来就是按打分排的，这里显式排一次，免得改了上游就悄悄错位。
+    ranks = sig.sort_values("score", ascending=False).reset_index(drop=True)
+    picked = ranks[ranks["shares"] > 0]
+    cap_w = cfg["account"]["max_weight_per_stock"] * capital
+
+    st.subheader(f"信号排名（信号日 {sig_date}）")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("入选", f"{len(picked)} 只")
+    c2.metric("一手超上限", f"{(ranks['status'] == '一手超上限').sum()} 只")
+    c3.metric("流动性未达标", f"{(ranks['status'] == '流动性未达标').sum()} 只")
+    c4.metric("名额已满", f"{(ranks['status'] == '名额已满').sum()} 只")
+    st.caption(
+        f"全池 {len(ranks)} 只，按模型打分从高到低排。未入选的在「未入选原因」列里给出理由："
+        f"**一手超上限** = 100 股就超过单只上限 {cap_w:,.0f} 元（资金买不起，不是模型不看好）；"
+        f"**流动性未达标** = 不在滚动 {cfg['universe']['liquidity_window']} 日成交额前 "
+        f"{cfg['universe']['liquidity_pct']:.0%}；**名额已满** = 前面已经选满 "
+        f"{cfg['account']['max_positions']} 只；**资金不足** = 轮到它时余钱不够一手。")
+
+    scope = st.radio("显示范围", [f"入选 {len(picked)} 只", "前 60 名", f"全池 {len(ranks)} 只"],
+                     horizontal=True, index=1)
+    view = picked if scope.startswith("入选") else (ranks.head(60) if scope == "前 60 名" else ranks)
+    tech = st.checkbox("附技术面（每只一次行情请求）", value=len(view) <= 60)
+
+    q = quotes(tuple(view["code"]))
     ts_all = sorted({v["ts"] for v in q.values()})
     if ts_all:
         st.caption(f"实时价报价时间：{ts_all[0]}" + (f" ~ {ts_all[-1]}" if ts_all[0] != ts_all[-1] else ""))
 
-    if st.checkbox("拉取技术面（30 次请求，实测约 2 秒，缓存 5 分钟）", value=True):
-        rows = []
-        bar = st.progress(0.0)
-        for i, (_, r) in enumerate(picked.iterrows(), 1):
+    rows = []
+    bar = st.progress(0.0) if tech else None
+    for i, (_, r) in enumerate(view.iterrows(), 1):
+        info = q.get(r["code"], {})
+        px = info.get("price")
+        item = {"排名": int(r["rank"]), "代码": r["code"], "名称": r["name"],
+                "打分": float(r["score"]),
+                "入选": "✓" if r["shares"] > 0 else "",
+                "未入选原因": "" if r["shares"] > 0 else r["status"],
+                "持仓": "✓" if r["code"] in pos else "",
+                "股数": int(r["shares"]),
+                "一手成本": float(r["lot_cost"]),
+                "信号日价": float(r["price"]), "现价": px,
+                "较信号日": (px / r["price"] - 1) if px else None,
+                "报价时间": info.get("ts", "—")}
+        if tech:
             d = kline(r["code"], 240, 120)
-            info = q.get(r["code"], {})
-            item = {"排名": int(r["rank"]), "代码": r["code"], "名称": r["name"],
-                    "打分": r["score"], "持仓": "✓" if r["code"] in pos else "",
-                    "信号日价": float(r["price"]), "现价": info.get("price"),
-                    "较信号日": (info["price"] / r["price"] - 1) if info.get("price") else None,
-                    "报价时间": info.get("ts", "—")}
             if not d.empty and len(d) >= 60:
                 d = add_indicators(d)
                 last = d.iloc[-1]
                 item |= {"距MA20": float(last["close"] / last["MA20"] - 1),
                          "RSI14": float(last["RSI14"]), "量比": float(last["量比"]),
                          "指标截至": str(last["day"])}
-            rows.append(item)
-            bar.progress(i / len(picked))
+            bar.progress(i / len(view))
+        rows.append(item)
+    if bar:
         bar.empty()
-        t = pd.DataFrame(rows)
-        fmt = {"打分": "{:.4f}", "信号日价": "{:.2f}", "现价": "{:.2f}", "较信号日": "{:+.1%}",
-               "距MA20": "{:+.1%}", "RSI14": "{:.1f}", "量比": "{:.2f}"}
-        # 只格式化真实存在的列：某只取不到行情时它那几列会整列缺席，
-        # 直接把完整字典交给 style.format 会 KeyError，整页白屏。
-        st.dataframe(paint(t.style.format({k: v for k, v in fmt.items() if k in t.columns}, na_rep="—"),
-                           ["较信号日", "距MA20"]),
-                     width="stretch", hide_index=True, height=640)
+
+    t = pd.DataFrame(rows)
+    fmt = {"打分": "{:.4f}", "一手成本": "{:,.0f}", "信号日价": "{:.2f}", "现价": "{:.2f}",
+           "较信号日": "{:+.1%}", "距MA20": "{:+.1%}", "RSI14": "{:.1f}", "量比": "{:.2f}"}
+    # 只格式化真实存在的列：某只取不到行情时它那几列会整列缺席，
+    # 直接把完整字典交给 style.format 会 KeyError，整页白屏。
+    sty = t.style.format({k: v for k, v in fmt.items() if k in t.columns}, na_rep="—")
+    sty = paint(sty, ["较信号日", "距MA20"])
+    # 入选行整行淡染，一眼看出打分高但买不起的那些
+    sty = sty.apply(lambda row: ["background-color:rgba(214,39,40,0.07)" if row["入选"] == "✓" else ""] * len(row),
+                    axis=1)
+    st.dataframe(sty, width="stretch", hide_index=True,
+                 height=min(720, 38 * len(t) + 40))
+    if tech:
         st.caption("「距MA20」「RSI14」「量比」按日线收盘计算，时间见「指标截至」列。")
-    else:
-        st.dataframe(picked[["rank", "code", "name", "score", "price", "shares", "status"]],
-                     width="stretch", hide_index=True, height=640)
-        st.caption(f"表中 price 为信号日 {sig_date} 的收盘价。")
+
+    skipped = ranks[(ranks["shares"] == 0) & (ranks["status"] == "一手超上限")].head(5)
+    if not skipped.empty:
+        names_ = "、".join(f"{r['name']}（一手 {r['lot_cost']:,.0f} 元，排名 {int(r['rank'])}）"
+                          for _, r in skipped.iterrows())
+        st.info(f"打分最高但买不起的几只：{names_}。单只上限 {cap_w:,.0f} 元是 "
+                f"`max_weight_per_stock` × 资金算出来的 —— 它们是被账户规模挡住的，不是模型不看好。")
