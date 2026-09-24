@@ -68,14 +68,17 @@ port_analysis_config: &port_analysis_config
             limit_threshold: 0.095
             deal_price: close
             # Measured for a 200k retail account on csi300, topk~30: commission
-            # 0.075% (the 5 CNY floor still binds), transfer 0.001%, half-spread
-            # 0.030%, and impact Y*sigma*sqrt(participation) with Y=1 and the
-            # universe's 2.29% daily vol giving 0.085% -- about 0.19% a side.
+            # 0.02354% by rate, but every ~6,667 CNY trade pays the 5 CNY floor, so
+            # 0.075% effective; transfer 0.001%, half-spread 0.030%, and impact
+            # Y*sigma*sqrt(participation) with Y=1 and the universe's 2.29% daily vol
+            # giving 0.085% -- about 0.19% a side, 0.24% on the sell side with stamp duty.
             # The 5bp/15bp defaults assume institutional size and understate this
             # by ~4x, which flatters any high-turnover strategy.
-            open_cost: 0.0019
-            close_cost: 0.0024
-            min_cost: 5
+            # production/run_daily.py passes these in from production/config.yaml; the
+            # defaults match the other templates so research runs compare like for like.
+            open_cost: {{ open_cost | default(0.0019, true) }}
+            close_cost: {{ close_cost | default(0.0024, true) }}
+            min_cost: {{ min_cost | default(5, true) }}
 
 task:
     model:

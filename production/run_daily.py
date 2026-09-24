@@ -54,7 +54,13 @@ def refresh_signal(cfg: dict, factors_path: Path, as_of: str) -> Path:
     from rdagent.utils.env import QTDockerEnv
     from rdagent.utils.qlib import ALPHA20
 
-    sig, uni = cfg["signal"], cfg["universe"]
+    sig, uni, trd = cfg["signal"], cfg["universe"], cfg["trading"]
+    # qlib 的 min_cost 是对整笔成本取下限，而不是只对佣金；0.14% 下它只在单笔 < 3,571 元时
+    # 才起作用，而实盘佣金在单笔 < 21,240 元时都按 5 元收。所以把佣金下限按单笔均值
+    # capital / max_positions 折成费率，替换掉 cost_one_side 里按费率算的佣金。
+    per_trade = cfg["account"]["capital"] / cfg["account"]["max_positions"]
+    commission = max(trd["commission_rate"], trd["min_commission"] / per_trade)
+    open_cost = round(trd["cost_one_side"] - trd["commission_rate"] + commission, 6)
     src = REPO / "rdagent/scenarios/qlib/experiment/factor_template"
     work = Path(tempfile.mkdtemp())
     for f in src.glob("*"):
@@ -91,6 +97,11 @@ def refresh_signal(cfg: dict, factors_path: Path, as_of: str) -> Path:
         "weight_decay": "1e-4",
         "topk": str(cfg["account"]["max_positions"]),
         "n_drop": "1",
+        # 回测的撮合成本必须和实盘估算同源，否则回测里赚的钱在实盘里未必赚得到。
+        # 卖出侧多一道印花税。
+        "open_cost": str(open_cost),
+        "close_cost": str(open_cost + trd["stamp_duty"]),
+        "min_cost": str(trd["min_commission"]),
         "MLFLOW_ALLOW_FILE_STORE": "true",
     }
     qt = QTDockerEnv()

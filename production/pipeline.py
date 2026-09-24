@@ -269,10 +269,13 @@ def estimate_cost(orders: pd.DataFrame, cfg: dict) -> float:
     if orders.empty:
         return 0.0
     trd = cfg["trading"]
-    per_side = orders["value"] * trd["cost_one_side"]
-    commission_floor = np.maximum(per_side, trd["min_commission"])
+    # 5 元下限只作用于佣金这一项，不是整个单边成本：cost_one_side 里的过户、半价差、
+    # 冲击不会因为下限而被"吸收"。拿整个 cost_one_side 去比下限，0.14% 下只有
+    # 单笔 < 3,571 元才触发，实际佣金下限在单笔 < 21,240 元时都在起作用。
+    commission = np.maximum(orders["value"] * trd["commission_rate"], trd["min_commission"])
+    other = orders["value"] * (trd["cost_one_side"] - trd["commission_rate"])
     stamp = orders.loc[orders["side"] == "SELL", "value"].sum() * trd["stamp_duty"]
-    return float(commission_floor.sum() + stamp)
+    return float(commission.sum() + other.sum() + stamp)
 
 
 # --------------------------------------------------------------------------- 名称
