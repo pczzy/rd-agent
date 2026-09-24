@@ -40,6 +40,7 @@ from production.pipeline import (  # noqa: E402
     rank_table,
     losing_positions,
     record_equity,
+    rolling_segments,
     save_positions,
     with_names,
 )
@@ -69,17 +70,18 @@ def refresh_signal(cfg: dict, factors_path: Path, as_of: str) -> Path:
     shutil.copy(factors_path, work / "combined_factors_df.parquet")
     shutil.copy(ROOT / "models/model.py", work / "model.py")
 
+    # 窗口随 as_of 后延，见 rolling_segments。test_end 用数据实际末端而非 2099：qlib 回测
+    # 循环会走到日历尽头再取下一步，越界抛的 IndexError 出现在预测产出之后（不影响
+    # pred.pkl），但它会在日志里留下一条假故障，掩盖真正需要注意的报错。
+    seg = rolling_segments(as_of, sig["label_horizon"], sig["valid_years"], sig["train_start"])
+    print(
+        f"训练 {seg['train_start']} ~ {seg['train_end']}，验证 {seg['valid_start']} ~ {seg['valid_end']}，"
+        f"预测 {seg['test_start']} ~ {seg['test_end']}"
+    )
+
     env = {
         "PYTHONPATH": "./",
-        "train_start": sig["train_start"],
-        "train_end": sig["train_end"],
-        "valid_start": sig["valid_start"],
-        "valid_end": sig["valid_end"],
-        "test_start": sig["valid_end"],
-        # 用数据实际末端而非 2099：qlib 回测循环会走到日历尽头再取下一步，
-        # 越界抛的 IndexError 出现在预测产出之后（不影响 pred.pkl），但它会在日志里
-        # 留下一条假故障，掩盖真正需要注意的报错。
-        "test_end": as_of,
+        **seg,
         "label_horizon": str(sig["label_horizon"]),
         "feature_names": str(list(ALPHA20.keys())),
         "feature_expressions": str(list(ALPHA20.values())),

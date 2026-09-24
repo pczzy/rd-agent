@@ -23,10 +23,11 @@ signal:
   label_horizon: 21
   refresh_every_n_days: 10 # 信号每 N 个交易日更新一次，其余日沿用
   seed: 42                 # 固定随机种子，否则两次刷新的差异里混着重训噪声
+  # 训练窗口随截止日自动后延（pipeline.rolling_segments）：
+  #   valid 取截止日往前 label_horizon 个交易日为止的 valid_years 年，
+  #   train 从 train_start 起、到 valid 开始前 label_horizon 个交易日为止（隔开标签重叠）。
   train_start: "2010-01-01"
-  train_end: "2023-12-31"
-  valid_start: "2024-01-01"
-  valid_end: "2025-12-31"
+  valid_years: 2
 
 trading:
   lot_size: 100            # A 股一手

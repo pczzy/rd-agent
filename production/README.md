@@ -56,8 +56,9 @@ tail -5 production/logs/update.log
 ## 每日操作
 
 ```bash
-# 1) 生成今日交易计划（首次或需刷新信号时，约 10-15 分钟）
-python production/run_daily.py
+# 1) 重训并生成今日交易计划（首次或需刷新信号时，约 10-15 分钟）
+#    先补数据，再按最新截止日后延训练窗口重训；日志在 logs/train-*.log
+production/train.sh
 
 # 2) 只重算组合和订单，复用上次预测（秒级）
 python production/run_daily.py --skip-signal
@@ -72,6 +73,11 @@ python production/run_daily.py --skip-signal --confirm
 
 信号按 `config.yaml` 的 `refresh_every_n_days: 10` 更新，其余交易日用 `--skip-signal`
 复用即可。
+
+训练窗口不用手改：每次重训按截止日自动后延（`pipeline.rolling_segments`）。
+valid 取截止日往前 `label_horizon` 个交易日为止的 `valid_years` 年；train 从 `train_start`
+起，到 valid 开始前 `label_horizon` 个交易日为止 —— 中间空出一段，两边标签用到的价格
+不重叠。窗口的实际日期会打印在训练输出里。
 
 ### 只成交了一部分怎么记
 
@@ -222,6 +228,7 @@ pipeline.py     因子计算 / 组合构建 / 订单生成 / 成本估算
 run_daily.py    每日入口
 update_data.py  从新浪补行情
 auto_update.sh  crontab 每交易日 18:00 调用，补数据 + 重生成 h5
+train.sh        手工重训：补数据 + 训练预测 + 出订单（不写持仓）
 record_trades.py 按笔记录实际成交（部分成交时代替 --confirm）
 indicators.py   技术指标 / price action，纯 pandas
 ledger.py       成交流水：持仓与现金的唯一事实来源（网页和命令行共用）
@@ -361,8 +368,8 @@ python production/record_fills.py --analyze                # 累计几天后出�
 
 1. **未接券商**。订单需人工执行。接入时在 `run_daily.py` 末尾加下单调用即可，
    `orders` DataFrame 已是标准格式。
-2. **模型 train/valid 止于 2025-12**。上线前应重跑一次 `run_daily.py`（不加
-   `--skip-signal`）用最新数据重训。
+2. **重训是手工的**。训练窗口会自动后延，但只有跑 `train.sh` 才会真的重训，
+   不跑的话 `pred.pkl` 停在上次训练的日期。
 3. **冲击成本系数未实测**。`cost_one_side` 里的 0.085% 用文献 `Y=1` 估算。建议用几千块
    小额单实测：记录下单时中间价与成交均价之差，反推真实 Y。
 4. **`best epoch = 0`**。20 日重叠标签使有效独立时段仅约 170 个（3401 交易日 / 20），
@@ -372,7 +379,7 @@ python production/record_fills.py --analyze                # 累计几天后出�
 
 ## 上线前检查
 
-- [ ] 用最新数据重训（`run_daily.py` 不加 `--skip-signal`）
+- [ ] 用最新数据重训（`production/train.sh`）
 - [ ] 小额实测冲击成本，回填 `config.yaml` 的 `cost_one_side`
 - [ ] 确认 `state/positions.json` 与券商实际持仓一致
 - [ ] 首日只用小仓位跑通全流程（下单、成交、对账）

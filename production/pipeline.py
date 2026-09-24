@@ -75,6 +75,45 @@ def compute_factors(h5_path: Path, out_path: Path) -> pd.DataFrame:
     return combined
 
 
+# --------------------------------------------------------------------------- 训练窗口
+
+CALENDAR = Path.home() / ".qlib/qlib_data/cn_data/calendars/day.txt"
+
+
+def rolling_segments(
+    as_of: str, horizon: int, valid_years: int, train_start: str, calendar: list[pd.Timestamp] | None = None
+) -> dict[str, str]:
+    """按截止日推出 train/valid/test 切分，每次重训窗口自动后延。
+
+    标签是 Ref($close,-h)/Ref($close,-1)-1，日期 t 的标签要用到 t+1..t+h 的收盘价，所以：
+      valid_end   = as_of 往前 h 个交易日 —— 再往后的标签还没有实现，进 valid 只会被 DropnaLabel 丢掉
+      valid_start = valid_end 往前 valid_years 年
+      train_end   = valid_start 往前 h 个交易日 —— 两段标签的价格区间不重叠，
+                    否则 early stopping 挑的 epoch 会被泄漏的收益抬高
+      test        = valid_end 次日 .. as_of，预测就从这段取最新一天
+    train_start 固定，训练集随时间扩张。
+    """
+    cal = calendar or [pd.Timestamp(x) for x in CALENDAR.read_text().split()]
+    cal = pd.DatetimeIndex(cal)
+    a = cal.searchsorted(pd.Timestamp(as_of), side="right") - 1
+    if a < 0 or cal[a] != pd.Timestamp(as_of):
+        raise ValueError(f"{as_of} 不是交易日或不在日历里（日历末日 {cal[-1].date()}）")
+    e = a - horizon
+    v = cal.searchsorted(cal[e] - pd.DateOffset(years=valid_years))
+    t = v - horizon
+    if t <= cal.searchsorted(pd.Timestamp(train_start)):
+        raise ValueError(f"截止 {as_of} 时训练集为空，检查 train_start / valid_years")
+    fmt = lambda i: cal[i].strftime("%Y-%m-%d")  # noqa: E731
+    return {
+        "train_start": train_start,
+        "train_end": fmt(t),
+        "valid_start": fmt(v),
+        "valid_end": fmt(e),
+        "test_start": fmt(e + 1),
+        "test_end": fmt(a),
+    }
+
+
 # --------------------------------------------------------------------------- 组合
 
 
