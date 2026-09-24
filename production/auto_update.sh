@@ -10,7 +10,8 @@
 # 0 退出。周末由 crontab 的 1-5 挡掉（A 股调休也不在周末开市）。
 
 set -uo pipefail
-
+export http_proxy=''
+export https_proxy=''
 export HOME=/root
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
