@@ -39,6 +39,7 @@ from production.pipeline import (  # noqa: E402
     load_positions,
     rank_table,
     losing_positions,
+    market_report,
     record_equity,
     rolling_segments,
     save_positions,
@@ -227,6 +228,9 @@ def main() -> int:
     for code, ret in losers:
         print(f"  [关注] {code} 浮亏 {ret:.1%}，建议人工核查基本面")
 
+    market = market_report(cfg["risk"].get("watch_indices", []))
+    print("\n".join(ln for ln in market if ln.startswith(("|", "- "))))
+
     if args.risk_only:
         # 信号未到刷新日时的每日一看：净值和回撤只需要持仓和当日价格，不需要预测。
         # 刻意不出订单 —— 同一份打分下，仅价格漂移就能让整手数和筛选结果变化，
@@ -260,6 +264,7 @@ def main() -> int:
         + ("  **已熔断，仅卖出**" if halted else ""),
         "",
         *(["## 需人工核查（浮亏 >30%）", ""] + [f"- {c} {r:.1%}" for c, r in losers] + [""] if losers else []),
+        *market,
         "## 订单",
         "",
         orders.to_markdown(index=False) if not orders.empty else "无",

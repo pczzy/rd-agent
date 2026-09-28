@@ -33,6 +33,7 @@ from production.indicators import (  # noqa: E402
     break_of_structure,
     classic_read,
     levels,
+    market_regime,
     pa_volume_read,
     patterns,
     session_volume,
@@ -50,7 +51,7 @@ from production.ledger import (  # noqa: E402
     read_ledger,
     replay,
 )
-from production.pipeline import load_cash, load_config, load_positions  # noqa: E402
+from production.pipeline import index_daily, load_cash, load_config, load_positions  # noqa: E402
 
 KLINE = ("http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
          "CN_MarketData.getKLineData?symbol={sym}&scale={scale}&ma=no&datalen={n}")
@@ -147,6 +148,42 @@ def latest_signals() -> tuple[pd.DataFrame, str | None]:
     if not files:
         return pd.DataFrame(), None
     return pd.read_csv(files[-1]), files[-1].stem
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def index_bars(code: str) -> tuple[pd.DataFrame, str | None]:
+    """指数日线 + 当日实时价，缓存口径同实时价。"""
+    return index_daily(code)
+
+
+def market_panel(codes: list[str]) -> None:
+    """大盘状态：只提示，不参与出单（为什么不做成空仓开关，见 indicators.market_regime）。"""
+    st.subheader("大盘状态")
+    cols = st.columns(max(1, len(codes)))
+    state_color = {"强势": COLOR["多"], "弱势": COLOR["空"], "震荡": COLOR["中性"]}
+    for col, code in zip(cols, codes):
+        with col:
+            try:
+                d, src = index_bars(code)
+                r = market_regime(d)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"{code} 行情获取失败：{exc}")
+                continue
+            name, ts = src.split(" @ ") if src else (code, r["as_of"])
+            st.markdown(f"**{name}**　<span style='color:{state_color[r['state']]};font-size:20px;"
+                        f"font-weight:600'>{r['state']}</span>　"
+                        f"<span style='color:#888;font-size:12px'>{r['close']:.2f} @ {ts}</span>",
+                        unsafe_allow_html=True)
+            t = pd.DataFrame([{"距MA20": r["vs_ma20"], "距MA60": r["vs_ma60"], "20日涨跌": r["ret20"],
+                               "60日回撤": r["dd60"], "20日波动": r["vol20"]}])
+            st.dataframe(paint(t.style.format({"距MA20": "{:+.1%}", "距MA60": "{:+.1%}", "20日涨跌": "{:+.1%}",
+                                               "60日回撤": "{:.1%}", "20日波动": "{:.0%}"}),
+                               ["距MA20", "距MA60", "20日涨跌"]), width="stretch", hide_index=True)
+            for flag in r["flags"]:
+                st.warning(flag)
+    st.caption("强势 = 价 > MA20 > MA60，弱势 = 价 < MA20 < MA60，其余为震荡；含当日实时价。**仅提示，不影响订单**："
+               "回测 2022-01 ~ 2026-08，按大盘弱势空仓的 15 种规则都不如不择时（+12.4%/年）—— "
+               "模型买的是超跌股，超额收益多出在大盘弱势的日子。要不要少买由你决定。")
 
 
 def peak_equity() -> float | None:
@@ -281,6 +318,7 @@ target = sig[sig["shares"] > 0]["code"].tolist() if not sig.empty else []
 
 # ---- 风险总览 -------------------------------------------------------------
 if page == "风险总览":
+    market_panel(cfg["risk"].get("watch_indices", []))
     st.subheader("组合风险")
     if not pos:
         st.info("当前空仓。到「持仓管理」记一笔成交，这里才有内容。")

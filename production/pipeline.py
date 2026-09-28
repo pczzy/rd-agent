@@ -367,6 +367,69 @@ def with_names(orders: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# --------------------------------------------------------------------------- 指数行情
+
+_SINA_KLINE = ("http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+               "CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=no&datalen={n}")
+
+
+def index_daily(code: str, n: int = 120) -> tuple[pd.DataFrame, str | None]:
+    """指数日线（day/open/high/low/close），末尾补上当日实时价。返回 (日线, 名称 + 报价时间)。
+
+    新浪日线接口会滞后好几天（2026-09-28 收盘后仍只到 09-24），只用它的话"大盘状态"
+    说的是几天前的事。所以再取一次实时快照，日期比日线新就拼成当日这一根。
+    """
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "http://finance.sina.com.cn"}
+    text = requests.get(_SINA_KLINE.format(sym=code.lower(), n=n), headers=headers, timeout=20).text.strip()
+    if not text or text[0] != "[":
+        raise ValueError(f"{code} 日线返回异常: {text[:80]}")
+    d = pd.DataFrame(json.loads(text))[["day", "open", "high", "low", "close"]]
+    for col in ("open", "high", "low", "close"):
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+    d = d.dropna().reset_index(drop=True)
+
+    resp = requests.get(_SINA_HQ.format(codes=code.lower()), headers=headers, timeout=20)
+    resp.encoding = "gbk"
+    f = resp.text.split('"')[1].split(",") if '"' in resp.text else []
+    if len(f) > 31 and f[3] and float(f[3]) > 0:
+        if f[30] > d["day"].iloc[-1]:
+            bar = {"day": f[30], "open": float(f[1]), "high": float(f[4]), "low": float(f[5]), "close": float(f[3])}
+            d = pd.concat([d, pd.DataFrame([bar])], ignore_index=True)
+        return d, f"{f[0]} @ {f[30]} {f[31]}"
+    return d, None
+
+
+def market_report(codes: list[str]) -> list[str]:
+    """报告里的"大盘状态"一节。取不到行情只写一行说明，不拖垮出单。"""
+    from production.indicators import market_regime
+
+    rows, notes = [], []
+    for code in codes:
+        try:
+            d, src = index_daily(code)
+            r = market_regime(d)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"- {code} 行情获取失败：{exc}")
+            continue
+        name = src.split(" @ ")[0] if src else code
+        rows.append(f"| {name} | {r['close']:.2f} | {src.split(' @ ')[1] if src else r['as_of']} | **{r['state']}** "
+                    f"| {r['vs_ma20']:+.1%} | {r['vs_ma60']:+.1%} | {r['ret20']:+.1%} | {r['dd60']:.1%} "
+                    f"| {r['vol20']:.0%} |")
+        notes += [f"- ⚠ {name}：{flag}" for flag in r["flags"]]
+    table = ["| 指数 | 最新 | 时间 | 状态 | 距MA20 | 距MA60 | 20日涨跌 | 60日回撤 | 20日波动 |",
+             "|---|---:|---|---|---:|---:|---:|---:|---:|", *rows] if rows else []
+    return [
+        "## 大盘状态（仅提示，不影响订单）",
+        "",
+        *table,
+        *([""] + notes if notes else []),
+        "",
+        "> 强势 = 价 > MA20 > MA60，弱势 = 价 < MA20 < MA60，其余为震荡。回测显示按它空仓会更差",
+        "> （模型的超额多出在大盘弱势时，见 indicators.market_regime），要不要少买由你决定。",
+        "",
+    ]
+
+
 def rank_table(
     scores: pd.Series,
     prices: pd.Series,

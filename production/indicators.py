@@ -175,6 +175,42 @@ def volume_read(d: pd.DataFrame) -> list[tuple[str, str, str]]:
     return out
 
 
+# --------------------------------------------------------------------------- 大盘状态
+
+
+def market_regime(d: pd.DataFrame) -> dict:
+    """指数日线 -> 大盘状态。**只作提示，不参与出单。**
+
+    2026-09-28 回测过把它当开关（弱势就空仓）：2022-01 ~ 2026-08 不择时年化 +12.4%，
+    MA20/MA60/Brooks 趋势棒/波段结构/指数回撤/波动率等 15 种空仓规则全部更差或只靠一次
+    巧合。原因是模型本身在买超跌股，超额收益有七八成出在大盘弱势的日子里 —— 空仓恰好
+    躲掉了它最赚钱的时候。所以这里只给人看，要不要少买由人决定。
+
+    状态按收盘价与 MA20、MA60 的排列定：价 > MA20 > MA60 为强势，价 < MA20 < MA60 为
+    弱势，其余为震荡。另两条红旗独立判断：60 日内从高点回撤超 10%、20 日年化波动超 30%。
+    """
+    c = d["close"].astype(float)
+    last = float(c.iloc[-1])
+    ma20, ma60 = float(c.rolling(20).mean().iloc[-1]), float(c.rolling(60).mean().iloc[-1])
+    dd60 = last / float(c.tail(60).max()) - 1
+    vol20 = float(c.pct_change().tail(20).std() * np.sqrt(252))
+    ret20 = last / float(c.iloc[-21]) - 1 if len(c) > 20 else np.nan
+
+    if last > ma20 > ma60:
+        state = "强势"
+    elif last < ma20 < ma60:
+        state = "弱势"
+    else:
+        state = "震荡"
+    flags = []
+    if dd60 <= -0.10:
+        flags.append(f"60 日内从高点回撤 {dd60:.1%}")
+    if vol20 >= 0.30:
+        flags.append(f"20 日年化波动 {vol20:.0%}，剧烈波动")
+    return {"close": last, "state": state, "vs_ma20": last / ma20 - 1, "vs_ma60": last / ma60 - 1,
+            "dd60": dd60, "vol20": vol20, "ret20": ret20, "flags": flags, "as_of": str(d["day"].iloc[-1])}
+
+
 # --------------------------------------------------------------------------- price action
 
 
